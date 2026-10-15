@@ -4322,7 +4322,7 @@ const saveS=()=>{try{localStorage.setItem('reefQuestSettings',JSON.stringify(S))
 const NEWG=()=>({inv:{},recipes:{potion:1},crafted:{},perk:{armor:0,magnet:0,collect:0,stun:0,lift:0},stage:0,got:{},pearls:0,shells:0,secrets:0,plank:0,upg:{spd:0,hp:0,boost:0},cp:0,skin:'clown',unlocked:{clown:1},time:0,playTime:0,done:false,lvlP:0,lantern:false,size:1,eaten:0,col:{star:0,glass:0,coin:0,rare:0}});
 let G=NEWG();let hasSave=false;
 try{const s=JSON.parse(localStorage.getItem('reefQuestSave')||'null');if(s){G=Object.assign(NEWG(),s);G.col=Object.assign({star:0,glass:0,coin:0,rare:0},s.col||{});if(G.playTime==null)G.playTime=G.time||0;hasSave=true}}catch(e){}
-const saveG=()=>{try{localStorage.setItem('reefQuestSave',JSON.stringify(G))}catch(e){}};
+const saveG=()=>{if(window.__noSave)return;try{localStorage.setItem('reefQuestSave',JSON.stringify(G))}catch(e){}};
 // ---------- renderer ----------
 const cv=$('c');const ren=new T.WebGLRenderer({canvas:cv,antialias:true,powerPreference:'high-performance'});
 ren.outputColorSpace=T.SRGBColorSpace;
@@ -4652,7 +4652,7 @@ function buildPlayer(){if(plG){scene.remove(plG)}const k=SKINS[G.skin].sp;const 
  plMesh=new T.InstancedMesh(g,fishMat(k,plAmp,plFreq),1);plMesh.frustumCulled=false;setInst(plMesh,0,0,0,0,-Math.PI/2,1);plMesh.instanceMatrix.needsUpdate=true;
  plG=new T.Group();plPivot=new T.Group();plCr=null;if(k==='clown'&&typeof buildCreature==='function'){try{plCr=buildCreature(T,'player',{quality:CQ()});plCr.rotation.y=-Math.PI/2;plMesh=plCr;try{plLen=crLen('player')||1}catch(e){}}catch(e){plCr=null;console.warn('player creature',e)}}plPivot.add(plMesh);plG.add(plPivot);scene.add(plG);plAmp.value=s.amp;plFreq.value=s.freq}
 let plLen=1;const FL=()=>plLen*G.size,maxFL=()=>3+Math.min(2,(G.crafted&&G.crafted.fins1?1:0)+(G.crafted&&G.crafted.fins2?1:0));
-const maxHp=()=>Math.round(100+G.upg.hp*25+(G.size-1)*40),baseSpd=()=>2*(7+G.upg.spd*.9+(G.size-1)*.8),boostDur=()=>4.5+G.upg.boost*.7,boostCdMax=()=>Math.max(2.5,5-G.upg.boost*.7);
+const maxHp=()=>Math.round(100+G.upg.hp*25+(G.size-1)*40),baseSpd=()=>(window.__tspd||1)*2*(7+G.upg.spd*.9+(G.size-1)*.8),boostDur=()=>4.5+G.upg.boost*.7,boostCdMax=()=>Math.max(2.5,5-G.upg.boost*.7);
 // trail bubbles
 const TRN=60;let trail,trailI=0;const trailD=[];
 function buildTrail(){const g=new T.SphereGeometry(.07,6,4);trail=new T.InstancedMesh(g,new T.MeshBasicMaterial({color:0xe8fbff,transparent:true,opacity:.7}),TRN);trail.frustumCulled=false;trail.instanceMatrix.setUsage(T.DynamicDrawUsage);for(let i=0;i<TRN;i++){trailD.push({p:new T.Vector3(),life:0,s:1});setInst(trail,i,0,-999,0,0,0)}scene.add(trail)}
@@ -5839,6 +5839,104 @@ function P3wireNugCrates(){if(!NG||!NG.setCollectTargets)return;
 
 console.log('[phase3] ready');
 if(typeof TEST!=='undefined'&&TEST){window.__q3=Object.assign(window.__q3||{},{spawnBoss,P3Q,QUESTS,ensureP3,kelpPt,wreckPt,stealthSpotted,stealthClear,stealthMaybeRetry,updBossPhases,P3spawnOldFangs,P3spawnGnasher,P3topupSw4,P3bossTopup,qAway,P3spawnQuestEel,P3liveSw4,P3wireNugCrates,eels:()=>eels})}
+
+// ---------- TEST / cheat menu (pause → 🧪 Test). On by default; ?notest hides it. ----------
+const TESTMENU=!P.has('notest');const TST={god:false,spd:1,dbg:false,wipeArm:0};
+window.__tspd=1;
+{const _h=hurt;hurt=function(){if(TST.god)return;return _h.apply(this,arguments)}}
+{const _d=die;die=function(){if(TST.god){PL.hp=maxHp();return}return _d.apply(this,arguments)}}
+function tstBadge(){let b=$('testbadge');if(!b){b=document.createElement('div');b.id='testbadge';document.body.appendChild(b)}
+ const on=[];if(TST.god)on.push('GOD');if(TST.spd!==1)on.push('×'+TST.spd);b.textContent=on.length?'🧪 TEST · '+on.join(' · '):'';b.style.display=on.length?'':'none'}
+function tstNear(d){const a=PL.yaw;const x=PL.p.x+Math.sin(a)*d,z=PL.p.z+Math.cos(a)*d;let y=PL.p.y;try{if(!LV)y=Math.max(y,height(x,z)+2)}catch(e){}return new T.Vector3(x,y,z)}
+function tstGo(fn){resume();setTimeout(()=>{try{fn()}catch(e){console.warn('test',e);toast('⚠ '+e.message)}},60)}
+function tstSave(){try{G.ft=FT?FT.getState():G.ft}catch(e){}saveG();try{setObjective()}catch(e){}}
+function tstSpawn(k){const pos=tstNear(14);let P=null;
+ if(k==='eel'){const E=P3spawnQuestEel(new T.Vector3(pos.x,pos.y-1,pos.z));E.q='tst';E.quest=0;const TG=eelTarget(E);TG.q=null;TG.name='Moray eel (test)';E.tst=1;toast('🐍 Moray eel spawned');return}
+ if(k==='fangs')P=spawnBoss('baracuda',pos,{sc:4,hpK:3,spd:6.8,det:26,q:'tst',name:'Old Fangs',tellMul:1.7,phases:2});
+ else if(k==='gnasher')P=spawnBoss('shark',pos,{sc:5,hpK:3.5,spd:7,det:30,q:'tst',name:'Gnasher',tellMul:1.85,phases:2});
+ else if(k==='shark')P=spawnPred('shark',pos,{sc:3,spd:6,det:22,q:'tst',name:'Shark'});
+ else if(k==='bigshark')P=spawnPred('shark',pos,{sc:4.4,spd:6.6,det:24,q:'tst',name:'Great shark'});
+ else if(k==='baracuda')P=spawnPred('baracuda',pos,{sc:2.8,spd:6.5,det:20,q:'tst',name:'Barracuda'});
+ if(!P){toast('Spawn cap reached — despawn test enemies first');return}P.tst=1;toast('⚔ Spawned '+(P.name||k));if(P.boss)try{engage(P)}catch(e){}}
+function tstDespawn(){let n=0;for(const P of [...QX.spawned])if(P.tst){despawn(P);n++}for(let i=eels.length-1;i>=0;i--){const E=eels[i];if(E.tst){scene.remove(E.grp);if(E.hole)scene.remove(E.hole);eels.splice(i,1);n++}}toast('🧹 Removed '+n+' test enemies')}
+const TMAXP={armor:3,magnet:2,collect:3,stun:2,lift:3,legs:10,shoes:8};
+function tstUpg(max){initCraftState();if(max){G.upg={spd:3,hp:5,boost:6};Object.assign(G.perk,TMAXP);RECIPES.forEach(r=>{G.recipes[r.id]=1;if(r.max)G.crafted[r.id]=r.max});G.dutchDeck=Math.max(G.dutchDeck|0,2);G.dutchUnlocked=1;G.dutchUp=G.dutchUp||{};DECK_SHOP.forEach(u=>{G.dutchUp[u.id]=1});try{if(NG&&NG.setCollectRadius)NG.setCollectRadius(12)}catch(e){}}
+ else{G.upg={spd:0,hp:0,boost:0};for(const k in G.perk)G.perk[k]=0;G.crafted={};G.recipes={potion:1};G.dutchUp={}}
+ try{applyPerks();applyNug()}catch(e){}PL.hp=maxHp();saveG();toast(max?'⬆ All upgrades maxed':'↺ Upgrades reset')}
+function tstShard(n){const sq=QUESTS.filter(q=>q.reward&&q.reward.shard);const tgt=sq[n-1];if(!tgt)return;const idx=QUESTS.indexOf(tgt);
+ for(let i=0;i<=idx;i++){const q=QUESTS[i];if(qs(q.id).s!=='done'){try{qComplete(q)}catch(e){console.warn('q',q.id,e)}}}
+ G.shards=Math.max(G.shards|0,n);if(G.stage<2)G.stage=2;G.prologue=1;try{qUnlock();ensureNug()}catch(e){}tstSave();toast('💠 Progress set to Shard '+n+' ('+tgt.name+')')}
+function tstCopy(txt){try{navigator.clipboard.writeText(txt).then(()=>toast('📋 Copied save JSON'),()=>{})}catch(e){}}
+function tstRender(){const d=$('pm_test');if(!d)return;const q=(()=>{try{return qTracked()}catch(e){return null}})();
+ const B=(a,l,cls)=>`<button class="btn tbtn${cls?' '+cls:''}" data-ta="${a}">${l}</button>`;const H=t=>`<div class="tsec">${t}</div>`;
+ const zones=MAINZ.map(id=>B('tp:'+id,ZM[id].name)).join('')+ZONES.filter(z=>z.isLevel).map(z=>B('tp:'+z.id,z.name)).join('');
+ const qopts=QUESTS.map(x=>`<option value="${x.id}">${x.id} · ${x.name} [${qs(x.id).s}${qs(x.id).p?' '+qs(x.id).p:''}]</option>`).join('');
+ const tiers=[['std','Standard'],['hd','HD'],['cine','Cinematic'],['ext','Extreme']];
+ d.innerHTML=`<div class="twarn">🧪 Test tools — cheats for playtesting. Changes save to this device.</div>
+ ${H('💰 Resources')}<div class="tgrid">${B('give:pearl','⚪ +25 Pearls')}${B('give:coin','🪙 +25 Coins')}${B('give:dp','⚙️ +25 Parts (DP)')}${B('give:all','🎒 +10 every item')}${B('give:qitems','📜 Quest items')}${B('give:xp','✨ +10 XP')}</div>
+ ${H('❤️ Health')}<div class="tgrid">${B('heal','❤️ Full heal')}${B('god',(TST.god?'🛡 God mode: ON':'🛡 God mode: off'),TST.god?'ton':'')}</div>
+ ${H('⬆ Upgrades')}<div class="tgrid">${B('upg:max','⬆ Max all upgrades')}${B('upg:reset','↺ Reset upgrades')}</div>
+ ${H('🐚 Teleport / fast travel')}<div class="tgrid">${zones}${B('ftall','🔓 Unlock all fast travel')}</div>
+ ${H('🎯 Quests')}<div class="tinfo">Tracked: <b>${q?q.name+' ('+q.id+', '+qs(q.id).s+', step '+(qs(q.id).p|0)+')':'story / none'}</b> · 💠 ${G.shards|0}/7</div>
+ <div class="tgrid">${B('q:jump','📍 Jump to objective')}${B('q:done','✅ Complete objective')}</div>
+ <select id="tqsel" class="tsel">${qopts}</select>
+ <div class="tgrid">${B('q:start','▶ Start quest')}${B('q:step-','− step')}${B('q:step+','+ step')}${B('q:fin','✅ Complete it')}</div>
+ <div class="tgrid">${[1,2,3,4].map(n=>B('shard:'+n,'💠 Shard '+n)).join('')}${B('q:reset','↺ Reset quests','tdanger')}</div>
+ ${H('⚔ Spawn near you')}<div class="tgrid">${B('sp:shark','🦈 Shark')}${B('sp:bigshark','🦈 Great shark')}${B('sp:baracuda','🐟 Barracuda')}${B('sp:eel','🐍 Moray eel')}${B('sp:fangs','👑 Old Fangs')}${B('sp:gnasher','👑 Gnasher')}${B('sp:clear','🧹 Despawn test enemies')}</div>
+ ${H('🍗 '+NN())}<div class="tgrid">${B('nug:on','🍗 Summon buddy')}${B('nug:off','↺ Reset (remove buddy)')}</div>
+ ${H('🎵 Music zone test')}<div class="tgrid">${MAINZ.map(id=>B('mus:'+id,'♪ '+ZM[id].name)).join('')}${B('mus:auto','♪ Back to auto')}</div>
+ ${H('🖥 Visuals / debug')}<div class="tgrid">${tiers.map(([v,l])=>B('gfx:'+v,(S.gfx||'std')===v?'● '+l:l,(S.gfx||'std')===v?'ton':'')).join('')}${B('fps','FPS overlay: '+(S.fps?'ON':'off'),S.fps?'ton':'')}${B('dbg','Debug overlay: '+(TST.dbg?'ON':'off'),TST.dbg?'ton':'')}</div>
+ ${H('🏃 Speed multiplier')}<div class="tgrid">${[1,1.5,2,3,5].map(v=>B('spd:'+v,'×'+v,TST.spd===v?'ton':'')).join('')}</div>
+ ${H('💾 Save')}<textarea id="tsave" class="tsel" rows="3" placeholder="Save JSON appears here; paste one to import"></textarea>
+ <div class="tgrid">${B('sv:exp','📤 Export / copy')}${B('sv:imp','📥 Import pasted JSON')}${B('sv:wipe',TST.wipeArm>Date.now()?'⚠ Tap again to WIPE':'🗑 Wipe save','tdanger')}</div>
+ <div class="tinfo">No time-of-day or weather system exists in this build.</div>`;
+ const sel=$('tqsel');if(sel&&(TST.qsel||q))sel.value=TST.qsel||q.id;if(TST.exp!=null){$('tsave').value=TST.exp}}
+function tstAct(a){{const sl=$('tqsel');if(sl)TST.qsel=sl.value;const ta=$('tsave');if(ta&&a!=='sv:exp')TST.exp=ta.value||null}const [k,v]=a.split(':');const selq=()=>QM[($('tqsel')||{}).value];
+ switch(k){
+ case 'give':initCraftState();if(v==='pearl'){G.inv.pearl+=25;G.pearls+=25}else if(v==='coin'){G.inv.coin+=25}else if(v==='dp'){G.inv.dp=(G.inv.dp|0)+25}else if(v==='all'){for(const id in ING)addInv(id,10);G.inv.dp=(G.inv.dp|0)+10}else if(v==='qitems'){G.shells=Math.max(G.shells|0,5);G.lantern=true;G.plank=(G.plank|0)+5;G.secrets=(G.secrets|0)+1;RECIPES.forEach(r=>{G.recipes[r.id]=1})}else if(v==='xp'){G.xp=(G.xp|0)+10}
+  saveG();toast('🎁 Given: '+v);break;
+ case 'heal':PL.hp=maxHp();PL.hurtT=0;toast('❤️ Fully healed');break;
+ case 'god':TST.god=!TST.god;if(TST.god)PL.hp=maxHp();tstBadge();toast('🛡 God mode '+(TST.god?'ON':'off'));break;
+ case 'upg':tstUpg(v==='max');break;
+ case 'tp':tstGo(()=>{if(!FT){toast('Fast travel unavailable');return}if(!LV&&MAINZ.includes(v)){const it=FT.minimapItems().find(m=>m.id==='station_'+v);if(it){PL._cY=null;PL.p.set(it.p.x,it.p.y+1.5,it.p.z+4);PL.v.set(0,0,0);PL.spd=0;camInit=true;try{FT.unlock(v)}catch(e){}toast('🐚 Warped to '+ZM[v].name);return}}toast('🐚 Travelling…');if(!FT.travelTo(v,{force:true,instant:true}))toast('Travel busy — try again')});return true;
+ case 'ftall':if(FT){[...MAINZ,...ZONES.filter(z=>z.isLevel).map(z=>z.id)].forEach(id=>{try{FT.unlock(id)}catch(e){}});tstSave();toast('🔓 All fast travel unlocked')}break;
+ case 'q':{if(v==='jump'){tstGo(()=>{const p=objPos();if(!p){toast('No objective position');return}PL._cY=null;PL.p.set(p.x,p.y+1.5,p.z+3);PL.v.set(0,0,0);camInit=true});return true}
+  if(v==='done'){const q=qTracked();if(!q){toast('No tracked quest');break}qComplete(q);qUnlock();tstSave();break}
+  if(v==='reset'){G.q={};G.shards=0;G.track=null;G.board&&(G.board.on=0);qMigrate();qUnlock();tstSave();toast('↺ Quests reset');break}
+  const q=selq();if(!q)break;const s=qs(q.id);
+  if(v==='start'){(q.pre||[]).forEach(id=>{if(qs(id).s!=='done')qs(id).s='done'});s.s='avail';qAccept(q);G.track=q.id;tstSave()}
+  else if(v==='step+'||v==='step-'){if(s.s!=='active'){s.s='avail';qAccept(q)}s.p=Math.max(0,(s.p|0)+(v==='step+'?1:-1));if(q.need&&s.p>=q.need&&!q.prog){qComplete(q);qUnlock()}tstSave();toast(q.id+' step '+s.p+(q.need?'/'+q.need:''))}
+  else if(v==='fin'){qComplete(q);qUnlock();tstSave()}break}
+ case 'shard':tstShard(+v);break;
+ case 'sp':if(v==='clear'){tstDespawn();break}tstGo(()=>tstSpawn(v));return true;
+ case 'nug':if(v==='on'){G.nug=1;ensureNug();try{if(NG&&NG.object){NG.object.position.copy(PL.p);NG.object.position.y+=.5}}catch(e){}toast('🍗 '+NN()+' summoned')}else{G.nug=0;applyNugVis();toast('↺ Buddy removed (quest lag3 brings it back)')}saveG();break;
+ case 'mus':if(!AU){toast('Audio starts after first tap');break}if(v==='auto'){curZone=null;toast('♪ Music follows zone again')}else{AU.setZone(v);toast('♪ Playing '+ZM[v].name+' bed (until you change zone)')}break;
+ case 'gfx':S.gfx=v;saveS();toast('Reloading for '+v+'…');saveG();setTimeout(()=>location.reload(),300);break;
+ case 'fps':S.fps=!S.fps;saveS();if(!S.fps)$('fps').textContent='';break;
+ case 'dbg':TST.dbg=!TST.dbg;tstDbg();break;
+ case 'spd':TST.spd=+v;window.__tspd=TST.spd;tstBadge();toast('🏃 Speed ×'+v);break;
+ case 'sv':{const ta=$('tsave');if(v==='exp'){saveG();const j=JSON.stringify(G);TST.exp=j;tstCopy(j);break}
+  if(v==='imp'){try{const o=JSON.parse(ta.value);if(!o||typeof o!=='object'||!o.inv)throw new Error('not a Reef save');localStorage.setItem('reefQuestSave',JSON.stringify(o));toast('📥 Imported — reloading');window.__noSave=1;setTimeout(()=>location.reload(),400)}catch(e){toast('⚠ Import failed: '+e.message)}return}
+  if(v==='wipe'){if(!(TST.wipeArm>Date.now())){TST.wipeArm=Date.now()+4000;break}window.__noSave=1;try{localStorage.removeItem('reefQuestSave')}catch(e){}toast('🗑 Save wiped — reloading');setTimeout(()=>location.reload(),400);return}break}
+ }
+ tstRender();return false}
+let tstDbgT=null;function tstDbg(){let el=$('testdbg');if(!el){el=document.createElement('div');el.id='testdbg';document.body.appendChild(el)}el.style.display=TST.dbg?'':'none';clearInterval(tstDbgT);if(!TST.dbg)return;
+ tstDbgT=setInterval(()=>{try{el.style.display=(state==='play')?'':'none';const z=zoneAt(PL.p.x,PL.p.y,PL.p.z)||{};el.textContent=`pos ${PL.p.x.toFixed(1)},${PL.p.y.toFixed(1)},${PL.p.z.toFixed(1)} yaw ${PL.yaw.toFixed(2)}\nzone ${LVid||z.id} state ${state} hp ${Math.round(PL.hp)}/${maxHp()}\nsize ${G.size.toFixed(2)} spd ${baseSpd().toFixed(1)} preds ${preds.filter(p=>!(p.dead>0)).length} eels ${eels.length}\nfps ${fpsShow.toFixed(0)} dpr ${dpr.toFixed(2)} ${qk} gfx ${S.gfx||'std'}\ntrack ${G.track||'story'} shards ${G.shards|0}`}catch(e){el.textContent=String(e)}},400)}
+if(TESTMENU){
+ const st=document.createElement('style');st.textContent=`#pm_test{max-height:min(62vh,560px);overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-y;text-align:left;padding:2px 4px 12px}
+#pm_test .tsec{margin:12px 0 4px;font-weight:800;color:#9fffe0;font-size:14px}#pm_test .tgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:8px}
+#pm_test .tbtn{min-height:52px;margin:0!important;width:100%!important;max-width:none!important;font-size:14px;padding:6px 8px;line-height:1.15;white-space:normal}#pm_test .tbtn.ton{background:rgba(127,255,216,.4);border:1px solid #7fffd8}#pm_test .tbtn.tdanger{background:rgba(255,80,70,.35);border:1px solid #ff8a7a}
+#pm_test .tsel{width:100%;min-height:48px;font-size:14px;margin:8px 0;border-radius:10px;background:rgba(0,20,30,.8);color:#eff;border:1px solid rgba(255,255,255,.3);box-sizing:border-box}#pm_test .twarn{background:rgba(255,200,60,.2);border:1px solid #ffd76a;border-radius:10px;padding:8px;font-size:12px}#pm_test .tinfo{font-size:12px;opacity:.9;margin:6px 0}
+.pmtab[data-t=test]{background:rgba(255,200,60,.22)}.pmtab[data-t=test].sel{background:rgba(255,200,60,.5);border:1px solid #ffd76a}
+#testbadge{position:fixed;left:50%;top:calc(6px + env(safe-area-inset-top));transform:translateX(-50%);z-index:40;background:rgba(255,60,60,.85);color:#fff;font:800 12px system-ui;padding:4px 10px;border-radius:10px;letter-spacing:1px;pointer-events:none;box-shadow:0 0 10px rgba(255,80,80,.6)}
+#testdbg{position:fixed;left:calc(8px + env(safe-area-inset-left));top:calc(116px + env(safe-area-inset-top));z-index:39;background:rgba(0,0,0,.6);color:#9f9;font:11px/1.35 monospace;padding:6px 8px;border-radius:8px;white-space:pre;pointer-events:none}`;document.head.appendChild(st);
+ const _pb=pmBuild;pmBuild=function(){_pb.apply(this,arguments);const tabs=$('pmtabs');if(!tabs||$('pm_test'))return;const b=document.createElement('div');b.className='pmtab';b.dataset.t='test';b.textContent='🧪 Test';tabs.appendChild(b);
+  const d=document.createElement('div');d.className='pmpane';d.id='pm_test';d.style.display='none';$('pmbody').appendChild(d);
+  d.addEventListener('click',e=>{const t=e.target.closest&&e.target.closest('[data-ta]');if(!t)return;e.preventDefault();e.stopPropagation();try{sfx('blip')}catch(er){}const sc=d.scrollTop;try{tstAct(t.dataset.ta)}catch(er){console.warn('test action',er);toast('⚠ '+er.message)}d.scrollTop=sc});
+  ['pointerdown','touchstart'].forEach(ev=>d.addEventListener(ev,e=>e.stopPropagation()))};
+ const _pt=pmTab;pmTab=function(t){_pt.apply(this,arguments);if(t==='test')tstRender()};
+ tstBadge();
+}
 
 // ---------- Graphics tiers: std / hd / cine / ext ----------
 const GFX_MOB=/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||(matchMedia&&matchMedia('(pointer:coarse)').matches&&Math.min(screen.width,screen.height)<820);
