@@ -103,7 +103,7 @@ body.dual #up,body.dual #dn{display:none!important}body.dual #recal{display:none
 <div id="title" class="panel"><h1>REEF QUEST</h1><h2>The Lost Pearl</h2>
  <div id="tbtns"></div><div class="skins" id="skins"></div></div>
 <div id="pause" class="panel hidden"><h1 style="font-size:36px">Paused</h1>
- <div class="row">Graphics<select id="sq"><option value="auto">Auto</option><option value="low">Low</option><option value="med">Medium</option><option value="high">High</option><option value="ultra">Ultra</option></select></div>
+ <div class="row">Graphics<select id="sq"><option value="auto">Auto</option><option value="low">Low</option><option value="med">Medium</option><option value="high">High</option><option value="ultra">Ultra</option><option value="x360">X360 (10x detail, manual only)</option></select></div><div id="sqre" style="display:none;font-size:11px;opacity:.85;margin:-2px 0 6px">X360 needs a reload to switch on/off. <button class="btn" id="bsqre">Reload now</button></div>
  <div class="row">Visual tier<select id="sgfx"><option value="std">Standard</option><option value="hd">HD textures</option><option value="cine">Cinematic</option><option value="ext">Extreme</option></select></div><div id="gfxnote" style="font-size:11px;max-width:420px;opacity:.85;margin:-2px 0 6px"></div><div id="gfxre" style="display:none;margin-bottom:6px"><button class="btn" id="bgfxre">↻ Reload to apply (progress is saved)</button></div><div class="row">Sound<input type="checkbox" id="ssnd"></div>
  <div class="row">Controls<select id="sctl"><option value="dual">Dual sticks (default)</option><option value="auto">Auto (tilt if available)</option><option value="tilt">Tilt phone</option><option value="joy">Virtual joystick</option></select></div>
  <div class="row">Tilt sensitivity<input type="range" id="stsens" min="0.4" max="2.5" step="0.1"></div>
@@ -772,7 +772,7 @@ return{setZone,addZone,zones:()=>Object.keys(ZD),setDanger,play,setMuted,setVolu
  get ready(){return !!AC},get context(){return AC},get zone(){return zone},get danger(){return danger},get muted(){return muted},
  names:Object.keys(SFX),stats:()=>({live,peakLive,created,state:AC&&AC.state,zone}),_schedule:s=>sched(s)}}
 
-try{var __gx=JSON.parse(localStorage.getItem('reefQuestSettings')||'{}').gfx;if(__gx&&__gx!=='std'&&THREE.Box3){
+try{var __rs=JSON.parse(localStorage.getItem('reefQuestSettings')||'{}'),__gx=__rs.gfx,__x3=__rs.q==='x360'||/[?&]q=x360\b/.test(location.search);if(((__gx&&__gx!=='std')||__x3)&&THREE.Box3){
 // detail.js — curvature-adaptive geometry refinement + automatic distance LODs for the reef adventure models.
 // Standalone (THREE r160, slim OK). Modules (creatures, nugget, dutchman, fasttravel, flora) call it at the high / ultra
 // tiers when it is loaded; without it they build exactly as before.
@@ -842,6 +842,279 @@ function lodState(root){let hi=0,lo=0;root.traverse(m=>{const L=m.userData&&m.us
 const API={refine,upgrade,ratioFor,triCount,lodState};G.ReefDetail=API;if(typeof module!=='undefined'&&module.exports)module.exports=API})(typeof window!=='undefined'?window:globalThis);
 
 }}catch(e){console.warn('detail',e)}
+
+// x360.js — 'x360' top graphics tier for the reef adventure (early Xbox 360 class geometry + shading).
+// Standalone, THREE r160 (full or slim/Lambert build: it only patches Lambert/Phong/Standard shaders through
+// onBeforeCompile and the fog ShaderChunks). Needs detail.js (ReefDetail.refine) for the geometry.
+// OFF by default; phones never get it automatically. Nothing changes until you call one of the functions below.
+//
+// ReefX360.detect()                      -> {capable, gpu, cores, memory, mobile, software, probeMs, reasons[]}
+// ReefX360.enabled()                     -> manual pref ('on'/'off' in localStorage 'reef.x360') else detect().capable
+// ReefX360.setManual('on'|'off'|null)    -> manual override (null = auto)
+// ReefX360.upgrade(root, opts)           -> {before, current, x, meshes, ms}: 3-level LOD per mesh
+//      LOD0 = x geometry (>=10x the authored base tris: PN refinement + real displaced relief: scales, fin rays,
+//      shell plates, polyps, pores, frond veins, rock / wood relief), LOD1 = the mesh's current geometry
+//      (detail.js 3x if it ran), LOD2 = the authored base. + spec / rim / procedural bump material patch.
+// ReefX360.xGeometry(geo, {ratio, pattern})  cached refined + displaced geometry
+// ReefX360.patchMaterial(mat, {pattern, scale, spec, rim, bump})
+// ReefX360.instanced(im, opts)           near/far split of a static InstancedMesh (x geometry close up)
+// ReefX360.scan(scene, opts)             time-budgeted auto-upgrade of every not-yet-upgraded mesh
+// ReefX360.renderDistance(scene, camera, renderer, opts) -> controller (depth-tinted FogExp2 view distance,
+//      camera far + culling tied to it, frame-time adaptive, background dome matched to the fog)
+// ReefX360.update(camera)                per-frame tick (instanced splits, scan queue); the render-distance
+//      controller ticks itself from scene.onBeforeRender
+(function(G){'use strict';
+const VER='x360-1',KEY='reef.x360';
+let T0=null;const TH=o=>(o&&o.THREE)||T0||G.THREE;
+const clamp=(v,a,b)=>v<a?a:v>b?b:v,lerp=(a,b,t)=>a+(b-a)*t,sst=(a,b,x)=>{const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t)};
+const S={lodScale:1,ratio:10.5,stats:{upgraded:0,meshes:0,refineMs:0},recs:[],queue:[],frame:0,done:new WeakSet(),geoCache:new WeakMap(),patched:new WeakSet(),rd:null};
+function triCount(o){let n=0;o.traverse(m=>{if(!m.isMesh||!m.geometry||!m.visible&&m!==o)return;const g=m.geometry;n+=(g.index?g.index.count:g.attributes.position.count)/3*(m.isInstancedMesh?m.count:1)});return Math.round(n)}
+const gTris=g=>g?(g.index?g.index.count:g.attributes.position.count)/3:0;
+// ---------------------------------------------------------------- hardware detection
+let _det=null;
+function detect(o){o=o||{};if(_det&&!o.force)return _det;const r={capable:false,gpu:'',vendor:'',cores:navigator.hardwareConcurrency||0,memory:navigator.deviceMemory||0,mobile:false,software:false,probeMs:null,webgl2:false,reasons:[]};
+ const ua=navigator.userAgent||'';r.mobile=!!(navigator.userAgentData&&navigator.userAgentData.mobile)||/Mobi|Android|iPhone|iPad|iPod/i.test(ua)||(/Macintosh/.test(ua)&&navigator.maxTouchPoints>1)||(G.matchMedia&&G.matchMedia('(pointer:coarse)').matches&&Math.min(screen.width,screen.height)<820);
+ let gl=null;const c=document.createElement('canvas');c.width=c.height=256;try{gl=c.getContext('webgl2',{antialias:false,powerPreference:'high-performance'});r.webgl2=!!gl;if(!gl)gl=c.getContext('webgl')}catch(e){}
+ if(gl){const ext=gl.getExtension('WEBGL_debug_renderer_info');r.gpu=String(ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER));r.vendor=String(ext?gl.getParameter(ext.UNMASKED_VENDOR_WEBGL):gl.getParameter(gl.VENDOR));
+  r.software=/swiftshader|llvmpipe|software|basic render|softpipe|mesa offscreen/i.test(r.gpu);if(o.probe!==false)r.probeMs=probe(gl)}
+ const g=r.gpu.toLowerCase();const strong=/rtx|gtx|quadro|radeon (rx|pro)|radeon\(tm\) rx|rx \d{3,4}|vega|apple m\d|apple gpu|arc\(tm\)|intel\(r\) arc| arc a|iris\(r\) xe|iris xe|radeon 7\d0m|radeon 6\d0m|geforce/i.test(g),weak=/mali|adreno|powervr|apple a\d|videocore|intel\(r\) (hd|uhd) graphics( \d{3})?$/i.test(g);
+ r.tier=strong?2:weak?0:1;
+ if(r.mobile)r.reasons.push('mobile device');if(r.software)r.reasons.push('software renderer');if(!gl)r.reasons.push('no WebGL');
+ if(r.cores&&r.cores<6)r.reasons.push('few CPU cores ('+r.cores+')');if(r.memory&&r.memory<8)r.reasons.push('deviceMemory '+r.memory+' GB');
+ if(r.probeMs!=null&&r.probeMs>(strong?6:4))r.reasons.push('slow GPU probe '+r.probeMs.toFixed(2)+' ms');if(weak)r.reasons.push('low-end GPU');
+ r.capable=!r.mobile&&!r.software&&!!gl&&!weak&&(r.probeMs==null||r.probeMs<=(strong?6:4))&&(strong||(r.cores>=8&&(!r.memory||r.memory>=8)));
+ if(!r.capable&&!r.reasons.length)r.reasons.push('GPU not recognised as desktop-class');
+ c.width=c.height=1;const lc=gl&&gl.getExtension('WEBGL_lose_context');if(lc)lc.loseContext();return _det=r}
+// quick frame-time probe: ~300k vertex-lit triangles (vertex + fill bound) at 256x256, median of 5 synced frames
+function probe(gl){try{const vs='attribute vec2 p;uniform float t;varying vec3 c;void main(){float a=p.x*6.2831+t,b=p.y*3.1415;vec3 q=vec3(sin(b)*cos(a),cos(b),sin(b)*sin(a));vec3 n=normalize(q+.1*sin(q*13.+t));c=vec3(.2)+max(dot(n,normalize(vec3(.3,.8,.5))),0.)*vec3(.8);gl_Position=vec4(q.xy*.9,q.z*.5,1.);}',
+  fs='precision mediump float;varying vec3 c;void main(){gl_FragColor=vec4(c,1.);}';const sh=(ty,s)=>{const x=gl.createShader(ty);gl.shaderSource(x,s);gl.compileShader(x);return x};
+  const pr=gl.createProgram();gl.attachShader(pr,sh(gl.VERTEX_SHADER,vs));gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,fs));gl.linkProgram(pr);if(!gl.getProgramParameter(pr,gl.LINK_STATUS))return null;gl.useProgram(pr);
+  const N=300,a=new Float32Array(N*N*6*2);let k=0;for(let j=0;j<N;j++)for(let i=0;i<N;i++){const u0=i/N,v0=j/N,u1=(i+1)/N,v1=(j+1)/N;a.set([u0,v0,u1,v0,u0,v1,u1,v0,u1,v1,u0,v1],k);k+=12}
+  const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,a,gl.STATIC_DRAW);const loc=gl.getAttribLocation(pr,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+  gl.enable(gl.DEPTH_TEST);const ut=gl.getUniformLocation(pr,'t'),px=new Uint8Array(4),ts=[];
+  for(let f=0;f<6;f++){const t0=performance.now();gl.uniform1f(ut,f*.1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.drawArrays(gl.TRIANGLES,0,N*N*6);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px);if(f)ts.push(performance.now()-t0)}
+  ts.sort((x,y)=>x-y);gl.deleteBuffer(b);gl.deleteProgram(pr);return ts[ts.length>>1]}catch(e){return null}}
+function manual(){try{const v=G.localStorage&&G.localStorage.getItem(KEY);return v==='on'||v==='off'?v:null}catch(e){return null}}
+function setManual(v){try{if(v==='on'||v==='off')G.localStorage.setItem(KEY,v);else G.localStorage.removeItem(KEY)}catch(e){}}
+function enabled(o){const m=manual();if(m)return m==='on';return detect(o).capable}
+// ---------------------------------------------------------------- procedural relief (CPU, real geometry)
+function h3(x,y,z){const h=Math.sin(x*127.1+y*311.7+z*74.7)*43758.5453;return h-Math.floor(h)}
+function vn3(x,y,z){const xi=Math.floor(x),yi=Math.floor(y),zi=Math.floor(z),xf=x-xi,yf=y-yi,zf=z-zi,u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf),w=zf*zf*(3-2*zf),c=(a,b,d)=>h3(xi+a,yi+b,zi+d);
+ return lerp(lerp(lerp(c(0,0,0),c(1,0,0),u),lerp(c(0,1,0),c(1,1,0),u),v),lerp(lerp(c(0,0,1),c(1,0,1),u),lerp(c(0,1,1),c(1,1,1),u),v),w)}
+function fbm3(x,y,z,o){let s=0,a=.5,f=1,t=0;for(let i=0;i<(o||3);i++){s+=a*vn3(x*f+i*17.3,y*f-i*9.1,z*f+i*5.7);t+=a;f*=2.07;a*=.5}return s/t}
+const CEL=[0,0];function cell(x,y,z){const xi=Math.floor(x),yi=Math.floor(y),zi=Math.floor(z);let d1=9,d2=9;
+ for(let a=-1;a<=1;a++)for(let b=-1;b<=1;b++)for(let c=-1;c<=1;c++){const X=xi+a,Y=yi+b,Z=zi+c,dx=X+h3(X,Y,Z)-x,dy=Y+h3(X+17.1,Y,Z)-y,dz=Z+h3(X,Y+31.7,Z)-z,d=dx*dx+dy*dy+dz*dz;if(d<d1){d2=d1;d1=d}else if(d<d2)d2=d}
+ CEL[0]=Math.sqrt(d1);CEL[1]=Math.sqrt(d2);return CEL}
+// pattern(p (normalised to the mesh size), frame) -> relief in units of the mesh size; amp per pattern
+const PAT={
+ fish:{amp:.0042,f(x,y,z,F){const c=cell(x*26,y*26,z*26),e=sst(0,.22,c[1]-c[0]),u=F.long(x,y,z),m=F.mid(x,y,z);return (e*.7-.35)+.45*Math.sin(u*2*Math.PI*8+Math.abs(m)*9)}},
+ fin:{amp:.011,f(x,y,z,F){const w=F.mid(x,y,z)*13+F.long(x,y,z)*1.5;const s=Math.abs(Math.sin(w*Math.PI));return Math.pow(s,.55)*1.2-.6+.15*(vn3(x*30,y*30,z*30)-.5)}},
+ shell:{amp:.009,f(x,y,z){return .65*(fbm3(x*7,y*7,z*7,3)-.5)+.35*(fbm3(x*19,y*19,z*19,2)-.5)}},// keratin grain only: the models already have their own scute / plate layout
+ skin:{amp:.0045,f(x,y,z){return (fbm3(x*7,y*7,z*7,3)-.5)*2+(vn3(x*31,y*31,z*31)-.5)*.5}},
+ rock:{amp:.03,f(x,y,z){const c=cell(x*4,y*4,z*4);return (fbm3(x*3.1,y*3.1,z*3.1,3)-.5)*2.2-.6*(1-sst(0,.07,c[1]-c[0]))}},
+ stone:{amp:.008,f(x,y,z){return (fbm3(x*9,y*9,z*9,3)-.5)*2}},
+ wood:{amp:.0045,f(x,y,z,F){const m=F.mid(x,y,z),u=F.long(x,y,z);return Math.sin(m*90+fbm3(u*4,m*4,0,2)*6)*.7+(vn3(x*40,y*40,z*40)-.5)*.6}},
+ coral:{amp:.012,f(x,y,z){const c=cell(x*20,y*20,z*20);return (1-sst(0,.32,c[0]))*1.2-.4+.25*(vn3(x*7,y*7,z*7)-.5)}},
+ sponge:{amp:.014,f(x,y,z){const c=cell(x*16,y*16,z*16);return -(1-sst(.05,.3,c[0]))*1.2+.4+.3*(fbm3(x*6,y*6,z*6,2)-.5)}},
+ frond:{amp:.006,f(x,y,z,F){const m=F.mid(x,y,z),u=F.long(x,y,z);return Math.cos(m*Math.PI*14)*.6+Math.sin(u*Math.PI*30+m*6)*.25}},
+ none:null};
+function frameOf(bb){const e=[bb.max.x-bb.min.x,bb.max.y-bb.min.y,bb.max.z-bb.min.z],ax=[0,1,2].sort((a,b)=>e[b]-e[a]),S=Math.max(1e-6,Math.hypot(e[0],e[1],e[2])),c=[(bb.max.x+bb.min.x)/2,(bb.max.y+bb.min.y)/2,(bb.max.z+bb.min.z)/2];
+ const comp=(k,x,y,z)=>k?k>1?z:y:x;return{e,ax,S,c,thin:e[ax[2]]<e[ax[0]]*.12,long:(x,y,z)=>comp(ax[0],x,y,z),mid:(x,y,z)=>comp(ax[1],x,y,z),short:(x,y,z)=>comp(ax[2],x,y,z)}}
+// displace along the welded normal (identical offset for every vertex sharing a position => no cracks), and tilt
+// each vertex's own normal by the tangential gradient (hard edges keep their crease)
+function displace(g,pat,ampK){const P=PAT[pat];if(!P)return 0;const T=T0;const pos=g.attributes.position,nor=g.attributes.normal;if(!nor)return 0;g.computeBoundingBox();const F=frameOf(g.boundingBox),S=Math.min(F.S,Math.max(1e-6,F.e[F.ax[2]])*5),A=P.amp*(ampK==null?1:ampK);// amp follows the part's thickness, not its length (whiskers, antennae, ropes stay thin)
+ const n=pos.count,pa=pos.array,na=nor.array,key=new Map(),pid=new Int32Array(n);let np=0;
+ for(let i=0;i<n;i++){const k=Math.round(pa[i*3]*1e4)+','+Math.round(pa[i*3+1]*1e4)+','+Math.round(pa[i*3+2]*1e4);let id=key.get(k);if(id==null){id=np++;key.set(k,id)}pid[i]=id}
+ const wn=new Float32Array(np*3),pp=new Float32Array(np*3);for(let i=0;i<n;i++){const j=pid[i]*3;wn[j]+=na[i*3];wn[j+1]+=na[i*3+1];wn[j+2]+=na[i*3+2];pp[j]=pa[i*3];pp[j+1]=pa[i*3+1];pp[j+2]=pa[i*3+2]}
+ const d=new Float32Array(np),gr=new Float32Array(np*3),eps=.004,f=(x,y,z)=>P.f((x-F.c[0])/S,(y-F.c[1])/S,(z-F.c[2])/S,F);
+ for(let j=0;j<np;j++){const x=pp[j*3],y=pp[j*3+1],z=pp[j*3+2],v=f(x,y,z);d[j]=v*A*S;const e=eps*S;gr[j*3]=(f(x+e,y,z)-v)/eps*A;gr[j*3+1]=(f(x,y+e,z)-v)/eps*A;gr[j*3+2]=(f(x,y,z+e)-v)/eps*A;
+  const l=Math.hypot(wn[j*3],wn[j*3+1],wn[j*3+2])||1;wn[j*3]/=l;wn[j*3+1]/=l;wn[j*3+2]/=l}
+ for(let i=0;i<n;i++){const j=pid[i];pa[i*3]+=wn[j*3]*d[j];pa[i*3+1]+=wn[j*3+1]*d[j];pa[i*3+2]+=wn[j*3+2]*d[j];
+  let nx=na[i*3],ny=na[i*3+1],nz=na[i*3+2];const gx=gr[j*3],gy=gr[j*3+1],gz=gr[j*3+2],gd=gx*nx+gy*ny+gz*nz;nx-=(gx-gd*nx);ny-=(gy-gd*ny);nz-=(gz-gd*nz);const l=Math.hypot(nx,ny,nz)||1;na[i*3]=nx/l;na[i*3+1]=ny/l;na[i*3+2]=nz/l}
+ pos.needsUpdate=nor.needsUpdate=true;g.computeBoundingBox();g.computeBoundingSphere();return A*S}
+// x geometry: PN/curvature refinement to >= ratio x the source, then real relief. Cached per (source, pattern, ratio).
+function xGeometry(src,o){o=o||{};const T=TH(o);T0=T;const D=G.ReefDetail;const ratio=o.ratio||S.ratio,pat=o.pattern||'none',k=pat+'|'+ratio+'|'+(o.amp||1);
+ let m=S.geoCache.get(src);if(!m){m=new Map();S.geoCache.set(src,m)}if(m.has(k))return m.get(k);
+ const t0=performance.now(),base=gTris(src);let g=src;
+ if(D&&D.refine&&base>0){g=D.refine(src,ratio,{THREE:T,passes:6,clamp:o.clamp==null?.22:o.clamp});let guard=0;while(gTris(g)<base*ratio*.985&&guard++<2){const r2=D.refine(g,base*ratio/gTris(g)*1.01,{THREE:T,passes:4,clamp:.22});if(gTris(r2)<=gTris(g))break;g.dispose&&g!==src&&g.dispose();g=r2}}
+ else{g=src.clone()}
+ if(g===src)g=src.clone();
+ if(pat!=='none'&&g.attributes.normal&&!src.userData.noRelief)g.userData.reliefAmp=displace(g,pat,o.amp);
+ g.userData=Object.assign({},src.userData,g.userData||{},{x360:ratio,xPattern:pat,tris:gTris(g)});S.stats.refineMs+=performance.now()-t0;m.set(k,g);return g}
+// ---------------------------------------------------------------- material patch: Blinn spec (Lambert), rim, procedural bump
+const PAT_ID={none:0,skin:0,fish:1,fin:2,shell:3,rock:4,stone:4,coral:5,sponge:6,frond:7,wood:8};
+const GLSL_PARS=`varying vec3 vX3;uniform vec4 uX3a;uniform vec4 uX3b;uniform vec3 uX3Rim;
+float x3h(vec3 p){return fract(sin(dot(p,vec3(127.1,311.7,74.7)))*43758.5453);}
+float x3n(vec3 p){vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(mix(x3h(i),x3h(i+vec3(1,0,0)),f.x),mix(x3h(i+vec3(0,1,0)),x3h(i+vec3(1,1,0)),f.x),f.y),mix(mix(x3h(i+vec3(0,0,1)),x3h(i+vec3(1,0,1)),f.x),mix(x3h(i+vec3(0,1,1)),x3h(i+vec3(1,1,1)),f.x),f.y),f.z);}
+vec2 x3c(vec3 p){vec3 i=floor(p),f=fract(p);float d1=8.,d2=8.;for(int x=-1;x<=1;x++)for(int y=-1;y<=1;y++)for(int z=-1;z<=1;z++){vec3 g=vec3(float(x),float(y),float(z));vec3 o=vec3(x3h(i+g),x3h(i+g+17.1),x3h(i+g+31.7));vec3 r=g+o-f;float d=dot(r,r);if(d<d1){d2=d1;d1=d;}else if(d<d2)d2=d;}return vec2(sqrt(d1),sqrt(d2));}
+float x3H(vec3 p,float k){
+ if(k<.5)return x3n(p)*.6+x3n(p*2.3)*.3+x3n(p*5.1)*.1;
+ if(k<1.5){vec2 c=x3c(p);return smoothstep(0.,.22,c.y-c.x)*.8+x3n(p*3.)*.2;}
+ if(k<2.5)return abs(sin(p.x*3.1+p.y*.3))*.7+x3n(p*2.)*.3;
+ if(k<3.5){return x3n(p*1.3)*.45+x3n(p*3.7)*.35+(1.-smoothstep(.0,.18,x3c(p*1.6).x))*.2;}
+ if(k<4.5){vec2 c=x3c(p*.8);return x3n(p)*.45+x3n(p*2.2)*.25+x3n(p*5.)*.12+smoothstep(0.,.08,c.y-c.x)*.18;}
+ if(k<5.5){vec2 c=x3c(p);return (1.-smoothstep(0.,.35,c.x))*.75+x3n(p*3.)*.25;}
+ if(k<6.5){vec2 c=x3c(p);return smoothstep(.05,.32,c.x)*.8+x3n(p*2.)*.2;}
+ if(k<7.5)return cos(p.x*2.)*.5+x3n(p*vec3(1.,6.,1.))*.5;
+ return sin(p.y*7.+x3n(p*vec3(.5,4.,.5))*5.)*.5+x3n(p*4.)*.25;}
+`;
+function patchMaterial(mat,o){if(!mat||S.patched.has(mat))return mat;if(Array.isArray(mat)){mat.forEach(m=>patchMaterial(m,o));return mat}
+ const lam=!!mat.isMeshLambertMaterial,ok=lam||mat.isMeshPhongMaterial||mat.isMeshStandardMaterial||mat.isMeshPhysicalMaterial||mat.isMeshToonMaterial;if(!ok)return mat;o=o||{};
+ const T=TH(o);S.patched.add(mat);const pid=PAT_ID[o.pattern]!=null?PAT_ID[o.pattern]:0;
+ const U={uX3a:{value:new T.Vector4(o.spec!=null?o.spec:(lam?.2:0),o.shininess||(pid===3||pid===5?60:34),o.rim!=null?o.rim:.32,o.bump!=null?o.bump:.55)},uX3b:{value:new T.Vector4(o.scale||12,pid,o.fade||28,0)},uX3Rim:{value:new T.Color(o.rimColor!=null?o.rimColor:0x9fdcff)}};
+ mat.userData.x360=U;const prev=mat.onBeforeCompile,prevKey=mat.customProgramCacheKey;
+ mat.onBeforeCompile=function(sh,r){if(prev&&prev!==T.Material.prototype.onBeforeCompile)prev.call(this,sh,r);Object.assign(sh.uniforms,U);
+  sh.vertexShader='varying vec3 vX3;\n'+sh.vertexShader.replace(/void\s+main\s*\(\s*\)\s*\{/,m=>m+'\n vX3=position;');
+  let f=GLSL_PARS+sh.fragmentShader;
+  f=f.replace('#include <normal_fragment_maps>',`#include <normal_fragment_maps>
+ {float xf=uX3a.w*(1.-smoothstep(uX3b.z*.5,uX3b.z,length(vViewPosition)));vec3 xp=vX3*uX3b.x;xf*=1.-smoothstep(.35,1.,length(fwidth(xp)));
+  if(xf>.001){float h=x3H(xp,uX3b.y);vec3 dpx=dFdx(-vViewPosition),dpy=dFdy(-vViewPosition);float dhx=dFdx(h),dhy=dFdy(h);vec3 r1=cross(dpy,normal),r2=cross(normal,dpx);float det=dot(dpx,r1)*faceDirection;
+   vec3 gr=sign(det)*(dhx*r1+dhy*r2);normal=normalize(abs(det)*normal-xf*.3*gr/uX3b.x);}}`);
+  f=f.replace('#include <lights_fragment_end>',`#include <lights_fragment_end>
+ {vec3 xv=normalize(vViewPosition);float xr=pow(1.-clamp(dot(normal,xv),0.,1.),3.);totalEmissiveRadiance+=uX3Rim*xr*uX3a.z*(.35+.65*diffuseColor.rgb);
+ #if NUM_DIR_LIGHTS>0
+  if(uX3a.x>0.){for(int i=0;i<NUM_DIR_LIGHTS;i++){vec3 hh=normalize(directionalLights[i].direction+xv);totalEmissiveRadiance+=directionalLights[i].color*pow(max(dot(normal,hh),0.),uX3a.y)*uX3a.x*(uX3a.y+8.)/48.;}}
+ #endif
+ }`);
+  sh.fragmentShader=f};
+ mat.customProgramCacheKey=function(){return (prevKey?prevKey.call(this):'')+'|'+VER+':'+pid};mat.needsUpdate=true;return mat}
+// ---------------------------------------------------------------- object upgrade (3-level distance LOD)
+function rootSize(root,T){root.updateMatrixWorld(true);const bb=new T.Box3();let any=false;const v=new T.Vector3();root.traverse(m=>{if(!m.isMesh||!m.geometry||!m.geometry.attributes.position)return;const P=m.geometry.attributes.position,st=Math.max(1,Math.floor(P.count/200));for(let i=0;i<P.count;i+=st){v.fromBufferAttribute(P,i).applyMatrix4(m.matrixWorld);bb.expandByPoint(v);any=true}});
+ if(!any)return 1;const s=new T.Vector3();bb.getSize(s);const ws=new T.Vector3();root.getWorldScale(ws);return Math.max(1e-3,s.length()/Math.max(1e-6,(ws.x+ws.y+ws.z)/3))}
+function canRefine(m){const g=m.geometry;if(!g||!g.attributes||!g.attributes.position)return false;if(m.isSkinnedMesh||m.isPoints||m.isLine||m.isSprite)return false;
+ if(g.morphAttributes&&Object.keys(g.morphAttributes).length)return false;if(m.userData.noRefine||m.userData.noX360||(g.userData&&(g.userData.dynamic||g.userData.noRefine)))return false;
+ const u=g.attributes.position.usage;if(u===35048)return false;// DynamicDrawUsage: CPU-deformed every frame
+ if(m.material&&[].concat(m.material).every(x=>x&&x.isMeshBasicMaterial)){g.computeBoundingBox();const e=g.boundingBox.getSize(new (T0.Vector3)()).toArray().sort((a,b)=>a-b);if(e[0]<e[2]*.12)return false}// thin unlit strips (whiskers, fins of light) stay as built
+ return true}
+// eyes / glints / glass: near-white or near-black, roundish parts stay smooth (refined silhouette, no relief, no bump)
+function isEyeLike(m,F){const mt=Array.isArray(m.material)?m.material[0]:m.material;if(!mt||!mt.color)return false;const c=mt.color,mx=Math.max(c.r,c.g,c.b),mn=Math.min(c.r,c.g,c.b);const round=!F.thin&&F.e[F.ax[0]]/Math.max(1e-6,F.e[F.ax[2]])<1.8;if(!round)return false;return (mn>.78)||(mx<.07)||(mt.transparent&&mt.opacity<.9)||(mt.emissive&&mt.emissiveIntensity>0&&(mt.emissive.r+mt.emissive.g+mt.emissive.b)>1.2)}
+function classify(m,o,size){if([].concat(m.material).every(x=>x&&x.isMeshBasicMaterial))return 'none';// unlit: smooth silhouette only, no relief/bump
+ if(typeof o.pattern==='function')return o.pattern(m,size)||'none';const g=m.geometry;if(!g.boundingBox)g.computeBoundingBox();const F=frameOf(g.boundingBox);const ws=new (TH(o)).Vector3();m.getWorldScale(ws);const ms=F.S*(ws.x+ws.y+ws.z)/3;
+ const rel=ms/(o._rootWorld||ms);if(rel<.07)return 'none';const g0=(m.userData.detailLOD&&m.userData.detailLOD.lo)||g;if(/eye|pupil|iris|cornea|glint|tooth|teeth|lens|glass|lamp|bulb/i.test(m.name||'')||isEyeLike(m,F)||(/Sphere|Icosahedron/.test(g0.type)&&rel<.25))return 'none';const p=o.pattern||'skin';if(F.thin&&(p==='fish'||p==='shell'))return 'fin';return p}
+function upgrade(root,o){o=Object.assign({ratio:S.ratio,pattern:'skin',lodDistance:null,minTris:8,material:true,instanced:false,exclude:null,amp:1},o||{});const T=TH(o);T0=T;const t0=performance.now();
+ if(!root||!T)return{before:0,current:0,x:0,meshes:0,ms:0};const before0=triCount(root);
+ const size=rootSize(root,T);const wsv=new T.Vector3();root.getWorldScale(wsv);o._rootWorld=size*(wsv.x+wsv.y+wsv.z)/3;
+ const LD=o.lodDistance||Math.max(7,size*4.2);const meshes=[];let base=0,cur=0,x=0;
+ root.traverse(m=>{if(!m.isMesh||S.done.has(m))return;if(o.exclude&&o.exclude(m))return;if(m.isInstancedMesh){if(o.instanced)meshes.push(m);return}if(canRefine(m))meshes.push(m)});
+ // classify first: a smooth part ('none': eyes, glints, teeth) that shares a material with a bumped part gets its own copy, so the bump stays off it
+ const PATS=new Map(),bumped=new Set();for(const m of meshes){const p=classify(m,o,size);PATS.set(m,p);if(p!=='none')[].concat(m.material).forEach(x=>bumped.add(x))}
+ for(const m of meshes){if(PATS.get(m)==='none'){const ms=[].concat(m.material);if(ms.some(x=>bumped.has(x)||S.patched.has(x))){const c=ms.map(x=>{const y=x.clone();y.onBeforeCompile=T.Material.prototype.onBeforeCompile;delete y.userData.x360;return y});m.material=Array.isArray(m.material)?c:c[0]}}}
+ for(const m of meshes){const D=m.userData.detailLOD,lo=D?D.lo:m.geometry,hi=m.geometry,bt=gTris(lo);if(bt<o.minTris){S.done.add(m);continue}
+  const pat=PATS.get(m);let X;try{X=xGeometry(lo,{THREE:T,ratio:o.ratio,pattern:pat,amp:o.amp})}catch(e){console.warn('x360 refine',e);S.done.add(m);continue}
+  if(o.material&&pat!=='none')patchMaterial(m.material,{THREE:T,pattern:pat,scale:o.bumpScale||(18/Math.max(.05,o._rootWorld)),spec:o.spec,rim:o.rim,bump:o.bump});
+  S.done.add(m);if(m.isInstancedMesh){instanced(m,{THREE:T,x:X,lodDistance:o.instLod||LD*.6});base+=bt*m.count;cur+=gTris(hi)*m.count;x+=gTris(X)*m.count;continue}
+  base+=bt;cur+=gTris(hi);x+=gTris(X);
+  const lod1=hi,lod2=lo,LD1=D?D.d:LD*2.5;m.userData.x360LOD={x:X,cur:lod1,base:lod2,d:LD,d1:LD1,pat};m.geometry=X;
+  if(o.lod!==false){const prev=m.onBeforeRender,wp=new T.Vector3(),cp=new T.Vector3();let lv=0;
+   if(!lo.boundingSphere)lo.computeBoundingSphere();const bs=lo.boundingSphere,bc=bs.center.clone(),br=bs.radius,ws=new T.Vector3();
+   // distance to the mesh's bounding sphere (not its origin): merged level/house meshes sit at the origin but span tens of metres
+   m.onBeforeRender=function(rn,sc,cam,geo,mat,grp){if(prev&&prev!==T.Object3D.prototype.onBeforeRender)prev.call(this,rn,sc,cam,geo,mat,grp);if(!cam||!cam.isPerspectiveCamera)return;
+    wp.copy(bc).applyMatrix4(this.matrixWorld);ws.setFromMatrixScale(this.matrixWorld);cp.setFromMatrixPosition(cam.matrixWorld);const d=Math.max(0,wp.distanceTo(cp)-br*Math.max(ws.x,ws.y,ws.z)),k=S.lodScale,d0=LD*k,d1=Math.max(LD1,d0*1.5);
+    const want=d<(lv===0?d0*1.1:d0*.9)?0:d<(lv===2?d1*.9:d1*1.1)?1:2;lv=want;const g=want===0?X:want===1?lod1:lod2;if(this.geometry!==g)this.geometry=g}}}
+ const r={before:before0,base,current:cur,x,ratio:base?x/base:0,meshes:meshes.length,lodDistance:LD,ms:+(performance.now()-t0).toFixed(1)};root.userData.x360=r;S.stats.upgraded++;S.stats.meshes+=meshes.length;return r}
+function lodState(root){const c=[0,0,0];root.traverse(m=>{const L=m.userData&&m.userData.x360LOD;if(L)c[m.geometry===L.x?0:m.geometry===L.cur?1:2]++});return c}
+function xTris(root){let n=0;root.traverse(m=>{if(!m.isMesh)return;const L=m.userData.x360LOD;const g=L?L.x:m.geometry;n+=gTris(g)*(m.isInstancedMesh?(m.userData.x360Inst?m.userData.x360Inst.n:m.count):1)});return Math.round(n)}
+// ---------------------------------------------------------------- instanced near/far split (static InstancedMesh)
+function instanced(im,o){const T=TH(o);if(im.userData.x360Inst)return im.userData.x360Inst;const X=o.x||xGeometry(im.geometry,{THREE:T,ratio:o.ratio||S.ratio,pattern:o.pattern||'rock'});
+ const n=im.count,rec={im,X,n,M0:im.instanceMatrix.array.slice(0,n*16),C0:im.instanceColor?im.instanceColor.array.slice(0,n*3):null,d:o.lodDistance||20,ver:im.instanceMatrix.version,probe:60,mode:'probe',xim:null,last:new T.Vector3(1e9,0,0),f:0,cheap:n*gTris(X)<=(o.cheap||90000)};
+ im.userData.x360Inst=rec;S.recs.push(rec);return rec}
+const _v=new (function(){this.x=0;this.y=0;this.z=0})();
+function tickInst(rec,cam,T){const im=rec.im;if(rec.mode==='dead'||!im.parent)return;
+ if(rec.mode==='probe'){if(im.instanceMatrix.version!==rec.ver){// written by its owner every frame -> dynamic: swap geometry if cheap
+   rec.mode='dead';if(rec.cheap){im.geometry=rec.X;im.userData.x360LOD={x:rec.X,cur:rec.X,base:rec.X}}return}
+  if(--rec.probe>0)return;if(rec.cheap){rec.mode='dead';im.geometry=rec.X;return}
+  rec.mode='split';const x=new T.InstancedMesh(rec.X,im.material,rec.n);x.name=(im.name||'inst')+':x360';x.frustumCulled=im.frustumCulled;x.castShadow=im.castShadow;x.receiveShadow=im.receiveShadow;x.renderOrder=im.renderOrder;
+  if(rec.C0){x.instanceColor=new T.InstancedBufferAttribute(new Float32Array(rec.n*3),3)}x.count=0;x.matrixAutoUpdate=false;x.userData.noX360=true;im.add(x);rec.xim=x;rec.f=99}
+ if(rec.mode!=='split')return;if(im.instanceMatrix.version!==rec.ver){// owner wrote matrices after the split -> restore + stop splitting
+  im.instanceMatrix.array.set(rec.M0);if(rec.C0){im.instanceColor.array.set(rec.C0);im.instanceColor.needsUpdate=true}im.count=rec.n;im.instanceMatrix.needsUpdate=true;rec.ver=im.instanceMatrix.version;im.remove(rec.xim);rec.xim.dispose();rec.mode='dead';return}
+ const cp=new T.Vector3().setFromMatrixPosition(cam.matrixWorld);rec.f++;if(cp.distanceTo(rec.last)<1.5&&rec.f<45)return;rec.f=0;rec.last.copy(cp);
+ const ip=new T.Vector3();im.updateMatrixWorld();const inv=cp.clone().applyMatrix4(new T.Matrix4().copy(im.matrixWorld).invert()),sc=new T.Vector3();im.getWorldScale(sc);const d=rec.d*S.lodScale/Math.max(1e-6,(sc.x+sc.y+sc.z)/3);
+ const A=im.instanceMatrix.array,B=rec.xim.instanceMatrix.array,M=rec.M0;let nf=0,nn=0;
+ for(let i=0;i<rec.n;i++){ip.set(M[i*16+12],M[i*16+13],M[i*16+14]);const near=ip.distanceTo(inv)<d;const dst=near?B:A,k=near?nn++:nf++;for(let j=0;j<16;j++)dst[k*16+j]=M[i*16+j];
+  if(rec.C0){const dc=near?rec.xim.instanceColor.array:im.instanceColor.array;dc[k*3]=rec.C0[i*3];dc[k*3+1]=rec.C0[i*3+1];dc[k*3+2]=rec.C0[i*3+2]}}
+ im.count=nf;rec.xim.count=nn;rec.xim.visible=nn>0;im.instanceMatrix.needsUpdate=true;rec.xim.instanceMatrix.needsUpdate=true;if(rec.C0){im.instanceColor.needsUpdate=true;rec.xim.instanceColor.needsUpdate=true}rec.ver=im.instanceMatrix.version}
+// ---------------------------------------------------------------- auto-scan (meshes nobody upgraded explicitly)
+function scan(scene,o){o=Object.assign({budgetMs:6,pattern:null,maxTris:60000},o||{});const T=TH(o);T0=T;const q=[];
+ scene.traverse(m=>{if(m.isMesh&&!m.isInstancedMesh&&!S.done.has(m)&&canRefine(m)&&!m.userData.x360LOD&&gTris(m.userData.detailLOD?m.userData.detailLOD.lo:m.geometry)<=o.maxTris&&m.material&&!m.material.isShaderMaterial&&!(m.material.transparent&&m.material.blending===2))q.push(m)});
+ q.forEach(m=>{if(!S.queue.includes(m))S.queue.push(m)});S.scanOpts=o;return q.length}
+function drainQueue(T,budget){const t0=performance.now();while(S.queue.length&&performance.now()-t0<budget){const m=S.queue.shift();if(S.done.has(m)||!m.parent)continue;const g=m.userData.detailLOD?m.userData.detailLOD.lo:m.geometry;
+  if(!g.boundingSphere)g.computeBoundingSphere();const ws=new T.Vector3();m.getWorldScale(ws);const r=g.boundingSphere.radius*(ws.x+ws.y+ws.z)/3;
+  const holder={traverse:f=>f(m),isObject3D:true,updateMatrixWorld(){m.updateMatrixWorld(true)},getWorldScale:v=>v.set(1,1,1),userData:{}};
+  const pat=(S.scanOpts&&S.scanOpts.pattern)||(m.material&&m.material.map?'stone':'skin');upgrade(holder,{THREE:T,pattern:pat,lodDistance:Math.max(6,r*2*4.2)})}}
+// ---------------------------------------------------------------- render distance: depth-tinted underwater exp2 fog
+const RD_TIERS={low:{max:95,min:55,target:33.3},med:{max:135,min:65,target:33.3},medium:{max:135,min:65,target:33.3},high:{max:180,min:75,target:16.7},ultra:{max:230,min:85,target:16.7},x360:{max:230,min:90,target:16.7}};
+let chunksInstalled=false;
+function installFogChunks(T){if(chunksInstalled)return;const C=T.ShaderChunk;if(!C||!C.fog_fragment)return;chunksInstalled=true;
+ // only the FOG_EXP2 path changes (radial distance, view-direction depth tint); linear Fog (what every phone tier uses) is untouched
+ C.fog_pars_vertex='#ifdef USE_FOG\n\tvarying float vFogDepth;\n\t#ifdef FOG_EXP2\n\tvarying vec3 vXFogDir;\n\t#endif\n#endif';
+ C.fog_vertex='#ifdef USE_FOG\n\tvFogDepth = - mvPosition.z;\n\t#ifdef FOG_EXP2\n\tvXFogDir = ( vec4( mvPosition.xyz, 0.0 ) * viewMatrix ).xyz;\n\t#endif\n#endif';
+ C.fog_pars_fragment='#ifdef USE_FOG\n\tuniform vec3 fogColor;\n\tvarying float vFogDepth;\n\t#ifdef FOG_EXP2\n\t\tuniform float fogDensity;\n\t\tvarying vec3 vXFogDir;\n\t#else\n\t\tuniform float fogNear;\n\t\tuniform float fogFar;\n\t#endif\n#endif';
+ C.fog_fragment='#ifdef USE_FOG\n\t#ifdef FOG_EXP2\n\t\tfloat xFd = length( vXFogDir );\n\t\tfloat fogFactor = 1.0 - exp( - fogDensity * fogDensity * xFd * xFd );\n\t\tfloat xFy = vXFogDir.y / max( xFd, 1e-4 );\n\t\tvec3 xFc = fogColor * ( 1.0 + '+'0.30'+' * max( xFy, 0.0 ) ) * ( 1.0 - '+'0.42'+' * max( - xFy, 0.0 ) );\n\t\tgl_FragColor.rgb = mix( gl_FragColor.rgb, xFc, fogFactor );\n\t#else\n\t\tfloat fogFactor = smoothstep( fogNear, fogFar, vFogDepth );\n\t\tgl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor );\n\t#endif\n#endif'}
+// fogFactor reaches 1-exp(-K^2) at the view distance D: K=2.1 -> 98.8% (99.3% at the far plane, 1.06 D)
+const FOG_K=2.1;
+function renderDistance(scene,camera,renderer,o){const T=TH(o);T0=T;o=Object.assign({tier:'x360',adaptive:true,surfaceY:0,deepY:-150,blue:.35,dark:.45,minLight:.045,drawCallBudget:1400,fade:1.5,dome:true,flora:[],enabled:true},o||{});
+ installFogChunks(T);const P=Object.assign({},RD_TIERS[o.tier]||RD_TIERS.x360,o.preset||{});
+ const src=scene.fog,srcColor=src&&src.color?src.color:new T.Color(.1,.35,.5);let wishFar=src&&src.far?src.far:P.max,wishNear=src&&src.near!=null?src.near:8;
+ const fog=new T.FogExp2(srcColor.clone(),FOG_K/P.max);Object.defineProperty(fog,'far',{get:()=>wishFar,set:v=>{wishFar=v},configurable:true});Object.defineProperty(fog,'near',{get:()=>wishNear,set:v=>{wishNear=v},configurable:true});
+ // the game keeps lerping its own fog colour object; we read it every frame and tint it (darker + bluer with depth)
+ Object.defineProperty(fog,'gameColor',{value:srcColor});const prevBg=scene.background,bgIsShared=prevBg&&prevBg.isColor&&prevBg===srcColor;const bg=new T.Color().copy(srcColor);
+ let dome=null;if(o.dome){const g=new T.SphereGeometry(1,32,16);const m=new T.ShaderMaterial({uniforms:{uC:{value:fog.color}},vertexShader:'varying vec3 vD;void main(){vD=position;vec4 p=projectionMatrix*modelViewMatrix*vec4(position,1.);gl_Position=p.xyww;}',
+   fragmentShader:'uniform vec3 uC;varying vec3 vD;void main(){float y=normalize(vD).y;vec3 c=uC*(1.+.30*max(y,0.))*(1.-.42*max(-y,0.));gl_FragColor=vec4(c,1.);\n#include <colorspace_fragment>\n}',side:T.BackSide,depthWrite:false,depthTest:false,fog:false});
+  dome=new T.Mesh(g,m);dome.renderOrder=-1e9;dome.frustumCulled=false;dome.name='x360:fog-dome';dome.userData.noX360=true;dome.onBeforeRender=(r,s,c)=>{dome.position.setFromMatrixPosition(c.matrixWorld);dome.scale.setScalar(Math.max(1,c.far*.5));dome.updateMatrixWorld()}}
+ const st={D:P.max,adapt:1,ema:null,last:0,slow:0,fastT:0,enabled:false,frame:0,calls:0,log:[]};
+ const prevOBR=scene.onBeforeRender;const cp=new T.Vector3();
+ function tint(out,y){const k=clamp((o.surfaceY-y)/(o.surfaceY-o.deepY),0,1);out.copy(srcColor);const hsl={h:0,s:0,l:0};out.getHSL(hsl);
+  // bluer: hue toward 0.6, darker: lightness down, but never below minLight (keeps the trench readable)
+  const tgtH=.6;let h=hsl.h+(tgtH-hsl.h)*o.blue*k;const l=Math.max(o.minLight,hsl.l*(1-o.dark*k));out.setHSL(h,Math.min(1,hsl.s*(1+.25*k)),l);return out}
+ function tick(rn,sc,cam){if(!st.enabled||!cam||!cam.isPerspectiveCamera)return;st.frame++;const now=performance.now();
+  if(st.last){const dt=Math.min(250,now-st.last);st.ema=st.ema==null?dt:st.ema+(dt-st.ema)*.06}st.last=now;
+  const info=rn&&rn.info&&rn.info.render;const calls=info?info.calls:0;st.calls=calls;
+  if(o.adaptive&&st.ema!=null&&st.frame>30){const tg=P.target;const over=st.ema>tg*1.25||calls>o.drawCallBudget,under=st.ema<tg*1.06&&calls<o.drawCallBudget*.85;const dts=Math.min(.1,(st.ema||16)/1000);
+   if(over){st.slow+=dts;st.fastT=0;if(st.slow>.5)st.adapt=Math.max(P.min/P.max,st.adapt*(1-.08*dts))}else if(under){st.fastT+=dts;st.slow=Math.max(0,st.slow-dts);if(st.fastT>3)st.adapt=Math.min(1,st.adapt*(1+.03*dts))}else{st.slow=Math.max(0,st.slow-dts*.5);st.fastT=0}
+   S.lodScale=lerp(.6,1,clamp((st.adapt-P.min/P.max)/(1-P.min/P.max),0,1))}
+  const want=clamp(Math.min(wishFar,P.max*st.adapt),P.min*.5,P.max);// smoothed (time constant ~o.fade s): no pulsing
+  const k=1-Math.exp(-Math.min(.1,(st.ema||16)/1000)/o.fade);st.D=st.D+(want-st.D)*k;if(st.D>wishFar)st.D=wishFar;/* noodle: never beyond the game's own fog distance (smoothing lag / start-up) */
+  cp.setFromMatrixPosition(cam.matrixWorld);tint(fog.color,cp.y);bg.copy(fog.color);
+  fog.density=FOG_K/st.D;const far=st.D*1.06;if(Math.abs(cam.far-far)>.01){cam.far=far;cam.updateProjectionMatrix()}
+  for(const f of o.flora)if(f&&f.setViewDistance)f.setViewDistance(st.D*1.02)}
+ const api={get distance(){return st.D},get frameMs(){return st.ema},get adapt(){return st.adapt},get drawCalls(){return st.calls},fog,dome,preset:P,options:o,
+  enable(){if(st.enabled)return api;st.enabled=true;scene.fog=fog;scene.background=bg;if(dome)scene.add(dome);
+   scene.onBeforeRender=function(rn,sc,cam,rt){if(prevOBR&&prevOBR!==T.Object3D.prototype.onBeforeRender)prevOBR.call(this,rn,sc,cam,rt);tick(rn,sc,cam)};return api},
+  disable(){if(!st.enabled)return api;st.enabled=false;src&&(src.far=wishFar,src.near=wishNear);scene.fog=src;scene.background=prevBg;if(dome&&dome.parent)dome.parent.remove(dome);scene.onBeforeRender=prevOBR||T.Object3D.prototype.onBeforeRender;S.lodScale=1;
+   if(src&&src.far)camera.far=src.far+2;camera.updateProjectionMatrix();for(const f of o.flora)if(f&&f.setViewDistance)f.setViewDistance(Infinity);return api},
+  setTier(t){Object.assign(P,RD_TIERS[t]||P);return api},addFlora(f){if(f&&!o.flora.includes(f))o.flora.push(f);return api},removeFlora(f){const i=o.flora.indexOf(f);if(i>=0)o.flora.splice(i,1);if(f&&f.setViewDistance)f.setViewDistance(Infinity);return api},
+  setAdaptive(b){o.adaptive=!!b;if(!b){st.adapt=1;S.lodScale=1}return api},force(D){st.adapt=clamp(D/P.max,0,1);st.D=Math.min(wishFar,D);S.lodScale=lerp(.6,1,clamp((st.adapt-P.min/P.max)/(1-P.min/P.max),0,1));return api},tint:(c,y)=>tint(c||new T.Color(),y),
+  stats(){return{distance:+st.D.toFixed(1),wish:wishFar,max:P.max,min:P.min,adapt:+st.adapt.toFixed(3),frameMs:st.ema==null?null:+st.ema.toFixed(2),density:+fog.density.toFixed(5),far:+camera.far.toFixed(1),drawCalls:st.calls,lodScale:+S.lodScale.toFixed(2)}}};
+ if(o.enabled)api.enable();S.rd=api;return api}
+// ---------------------------------------------------------------- per-frame tick
+function update(cam,o){S.frame++;const T=TH(o);if(!T||!cam)return;for(const r of S.recs)tickInst(r,cam,T);S.recs=S.recs.filter(r=>r.mode!=='dead'||r.im.userData.x360Inst!==r||true);if(S.queue.length)drainQueue(T,(o&&o.budgetMs)||(S.scanOpts&&S.scanOpts.budgetMs)||6)}
+// ---------------------------------------------------------------- install: wrap the global builders (no module edits needed for them)
+// While active, every build is asked for 'ultra' (or 'high' where that is the module's top) and then upgraded; the raw 'x360'
+// string never reaches a module that doesn't know it (creatures would map it to medium).
+const CREATURE_PAT={shark:'skin',barracuda:'fish',grouper:'fish',eel:'skin',turtle:'shell',octopus:'skin',prey:'fish',player:'fish'};
+const NPC_PAT={grouper:'fish',mom:'skin','trench-angler':'skin',octo:'skin','polar-seal':'skin','meadow-manatee':'skin','clams-crab':'shell','whale-crab':'shell','temple-hermit':'shell','vents-shrimp':'shell',bellhop:'skin',turtle:'shell'};
+let installed=null;
+function wants(o){return !!(o&&(o.quality==='x360'||o.x360===true))||(S.active&&!(o&&(o.quality==='low'||o.x360===false)))}
+function norm(o,q){return Object.assign({},o||{},{quality:q,x360:undefined})}
+function install(o){o=o||{};const T=TH(o);T0=T;if(installed)return installed;const W={},w=(obj,name,f)=>{if(obj&&typeof obj[name]==='function'&&!obj[name].__x360){const orig=obj[name];const g=f(orig);g.__x360=true;g.orig=orig;obj[name]=g;W[name]=[obj,orig]}};
+ w(G,'buildCreature',orig=>function(TT,kind,op){if(!wants(op))return orig.apply(this,arguments);const r=orig.call(this,TT,kind,norm(op,'ultra'));try{if(!(op&&op.count))upgrade(r.object||r,{THREE:TT,pattern:CREATURE_PAT[kind]||'skin'})}catch(e){console.warn('x360 creature',e)}return r});
+ if(G.ReefNPCs)w(G.ReefNPCs,'buildNPC',orig=>function(TT,id,op){if(!wants(op))return orig.apply(this,arguments);const m=orig.call(this,TT,id,norm(op,'ultra'));try{const b=m.getObjectByName('body')||m;upgrade(b,{THREE:TT,pattern:NPC_PAT[id]||'skin',amp:id==='bellhop'?.12:undefined,bump:id==='bellhop'?0:undefined,lodDistance:((m.userData&&m.userData.radius)||1.5)*9})}catch(e){console.warn('x360 npc',e)}return m});
+ w(G,'createNuggetGuardian',orig=>function(TT,sc,pl,op){if(!wants(op))return orig.apply(this,arguments);const N=orig.call(this,TT,sc,pl,norm(op,'ultra'));try{upgrade(N.object||N,{THREE:TT,pattern:'skin',ratio:13.5})}catch(e){}return N});
+ w(G,'buildFlyingDutchman',orig=>function(TT,op){if(!wants(op))return orig.apply(this,arguments);const D=orig.call(this,TT,norm(op,'high'));try{upgrade(D.object||D,{THREE:TT,pattern:'wood',lodDistance:60})}catch(e){}return D});
+ ['buildShrimp','buildBellhop','buildShellCarriage'].forEach(n=>w(G,n,orig=>function(TT,op){if(!wants(op))return orig.apply(this,arguments);const r=orig.call(this,TT,norm(op,'ultra'));try{upgrade(r.object||r,n==='buildBellhop'?{THREE:TT,pattern:'skin',amp:.12,bump:0}:{THREE:TT,pattern:'shell'})}catch(e){}return r}));
+ w(G,'createFastTravel',orig=>function(TT,sc,cam,op){if(!wants(op))return orig.apply(this,arguments);const F=orig.call(this,TT,sc,cam,norm(op,'ultra'));try{const c=F.carriage;if(c)upgrade(c.object||c,{THREE:TT,pattern:'shell',lodDistance:30})}catch(e){console.warn('x360 ft',e)}return F});
+ w(G,'placeHouses',orig=>function(TT,sc,npcs,op){if(!wants(op))return orig.apply(this,arguments);const H=orig.call(this,TT,sc,npcs,norm(op,'ultra'));try{(H.houses||[]).forEach(h=>{if(h.hi)upgrade(h.hi,{THREE:TT,pattern:'stone',lodDistance:22,amp:1.3})})}catch(e){console.warn('x360 houses',e)}return H});
+ if(G.ReefHouses&&W.placeHouses)G.ReefHouses.placeHouses=G.placeHouses;
+ w(G,'buildLevel',orig=>function(TT,sc,id,op){if(!wants(op))return orig.apply(this,arguments);return orig.call(this,TT,sc,id,Object.assign({},op||{},{quality:'x360',x360:true}))});
+ w(G,'createFlora',orig=>function(TT,sc,lv,op){if(!wants(op))return orig.apply(this,arguments);const F=orig.call(this,TT,sc,lv,Object.assign({},op||{},{quality:'x360'}));if(S.rd)S.rd.addFlora(F);return F});
+ if(G.ReefFlora&&W.createFlora)G.ReefFlora.createFlora=G.createFlora;
+ if(o.renderer&&o.scene&&o.camera&&o.renderDistance!==false&&(S.active||o.renderDistance===true))renderDistance(o.scene,o.camera,o.renderer,Object.assign({tier:'x360'},o.fog||{}));
+ installed={wrapped:Object.keys(W),uninstall(){for(const k in W){const[obj,orig]=W[k];obj[k]=orig}if(G.ReefFlora&&W.createFlora)G.ReefFlora.createFlora=W.createFlora[1];if(G.ReefHouses&&W.placeHouses)G.ReefHouses.placeHouses=W.placeHouses[1];installed=null}};return installed}
+function setActive(v){S.active=!!v;return S.active}
+function init(THREE){T0=THREE;return API}
+const API={VERSION:VER,init,install,setActive,get active(){return !!S.active},detect,enabled,setManual,manual,upgrade,xGeometry,patchMaterial,instanced,scan,update,renderDistance,lodState,xTris,triCount,displace,
+ PATTERNS:Object.keys(PAT),RD_TIERS,FOG_K,get lodScale(){return S.lodScale},set lodScale(v){S.lodScale=v},get ratio(){return S.ratio},set ratio(v){S.ratio=v},stats:()=>Object.assign({queue:S.queue.length,instanced:S.recs.length},S.stats),_S:S};
+G.ReefX360=API;if(typeof module!=='undefined'&&module.exports)module.exports=API})(typeof window!=='undefined'?window:globalThis);
 
 // flora.js — dense, species-based underwater vegetation and coral for the reef adventure levels.
 // Standalone: needs only THREE (r160, slim build OK). Optional: textures.js manager (HD normal / ORM maps), levels.js Level object.
@@ -1161,6 +1434,10 @@ function floraGeometry(T,id,lod){_T=T;lod=lod|0;const key=id+':'+lod;if(GEO[key]
 // 3x detail hi-LOD: curvature-adaptive refinement of lod 0 (needs detail.js; cached per species+ratio)
 function floraGeometryDetail(T,id,ratio){const g0=floraGeometry(T,id,0),D=typeof ReefDetail!=='undefined'?ReefDetail:null;if(!D||!(ratio>1))return g0;const key=id+':0d'+ratio;if(GEO[key])return GEO[key];
  const g=D.refine(g0,ratio,{THREE:T});g.computeBoundingSphere();g.userData=Object.assign({},g0.userData,{tris:(g.index?g.index.count:g.attributes.position.count)/3,verts:g.attributes.position.count,detail:ratio});return GEO[key]=g}
+// x360 tier: >=10x the authored LOD0 with real relief (polyps, pores, frond veins, fan ribs), needs detail.js + x360.js
+const X_PAT={seagrass:'frond',kelp:'frond',algae:'frond',fans:'fin',anemones:'skin',sponges:'sponge',corals:'coral'};
+function floraGeometryX(T,id){const g0=floraGeometry(T,id,0),X=G.ReefX360;if(!X||typeof ReefDetail==='undefined')return g0;const key=id+':x';if(GEO[key])return GEO[key];const sp=BY_ID[id];
+ const g=X.xGeometry(g0,{THREE:T,ratio:X.ratio,pattern:X_PAT[sp.cat]||'skin',amp:sp.cat==='seagrass'?.5:1});g.computeBoundingSphere();g.userData=Object.assign({},g0.userData,{tris:(g.index?g.index.count:g.attributes.position.count)/3,verts:g.attributes.position.count,detail:'x360'});return GEO[key]=g}
 // ---------------- materials (one per category; sway in the vertex shader with per-instance phase) ----------------
 const SWAY_VERT=`#include <begin_vertex>
 {vec3 ip=vec3(0.);mat3 IR=mat3(1.);
@@ -1217,12 +1494,14 @@ const RECIPES={
    sp:1.3,p:.75,patch:[.05,.2,.55],zone:.07,sc:[1.2,2.2]}]},
  whalefall:{layers:[{pick:{'slender-sea-pen':2,'phosphorescent-sea-pen':1.5,'glass-sponge':2,'tube-anemone':2,'wire-coral':.8,'plumose-anemone':.6,'giant-sea-fan':.4,'encrusting-sponge':.6},sp:1.6,p:.65,patch:[.05,.2,.55],zone:.08,sc:[1.1,1.9]}]}};
 RECIPES.default=RECIPES.meadow;
-const QUAL={low:{dens:.3,lod:.6,far:.7,shadows:false},medium:{dens:.55,lod:.8,far:.85,shadows:false},high:{dens:1,lod:1,far:1,shadows:true},ultra:{dens:1.5,lod:1.35,far:1.2,shadows:true}};
+const QUAL={low:{dens:.3,lod:.6,far:.7,shadows:false},medium:{dens:.55,lod:.8,far:.85,shadows:false},high:{dens:1,lod:1,far:1,shadows:true},ultra:{dens:1.5,lod:1.35,far:1.2,shadows:true},
+ x360:{dens:1.5,lod:1.35,far:1.2,shadows:true,x:true}};// x360: ultra + a 4th, closest LOD ('x', floraGeometryX) — only when opts.quality==='x360'
 function floraTextures(){return['kelp','coral','sponge']}
 // ---------------- createFlora ----------------
 function createFlora(T,scene,level,opts){_T=T;const t0=performance.now();
  opts=Object.assign({quality:'high',textures:null,seed:0,density:1,current:null,sway:1,push:1.4,pushStrength:.9,chunk:16,shadows:null,hides:true,recipe:null,lodScale:1,exclude:null,maxPerSpecies:60000},opts||{});
- let qn=opts.quality==='auto'?'high':opts.quality;if(!QUAL[qn])qn='high';const Q=QUAL[qn];const DETR=opts.detail!=null?opts.detail:(typeof ReefDetail!=='undefined'?ReefDetail.ratioFor(qn):1);
+ let qn=opts.quality==='auto'?'high':opts.quality;if(!QUAL[qn])qn='high';const Q=QUAL[qn];const XQ=!!Q.x&&!!G.ReefX360&&typeof ReefDetail!=='undefined';const DETR=opts.detail!=null?opts.detail:(typeof ReefDetail!=='undefined'?ReefDetail.ratioFor(Q.x?'ultra':qn):1);
+ let viewD=Infinity,xK=1,xAuto=1,xTrisDrawn=0;const XB=opts.xBudget||900000;// x360: closest-LOD triangle budget; the x distance self-scales (sqrt law) to stay under it
  const isL=!!(level&&level.def&&level.height);const id=isL?level.id:(level&&level.id)||'custom';
  const og=level&&level.origin,OX=og?(og.x!=null?og.x:og[0]):0,OZ=og?(og.z!=null?og.z:og[1]):0;
  const RAD=isL?level.def.r:(level.r||30),Hf=isL?(x,z)=>level.height(x,z):(level.height||(()=>0)),ceil=isL&&level.ceiling?(x,z)=>level.ceiling(x,z):()=>null;
@@ -1232,7 +1511,7 @@ function createFlora(T,scene,level,opts){_T=T;const t0=performance.now();
  const shadows=opts.shadows==null?Q.shadows:!!opts.shadows;
  const U={uFloraTime:{value:0},uFloraCur:{value:new T.Vector3(.5,0,.15)},uFloraPush:{value:new T.Vector4(0,-9999,0,opts.push)},uFloraSwayK:{value:opts.sway},uFloraPushK:{value:opts.pushStrength}};
  if(opts.current)U.uFloraCur.value.set(opts.current[0],0,opts.current[1]);
- const {mats,depth,get:matFor}=makeMaterials(T,U,texFn,shadows);
+ const {mats,depth,get:matFor}=makeMaterials(T,U,texFn,shadows);if(XQ)for(const k in mats){const cat=k.split(':')[0];G.ReefX360.patchMaterial(mats[k],{THREE:T,pattern:X_PAT[cat]||'skin',scale:14,spec:0,rim:.22,bump:.45})}
  const R=rng(hstr(id)+opts.seed*7919);
  let hmin=1e9,hmax=-1e9;for(let i=0;i<=16;i++)for(let j=0;j<=16;j++){const x=(i/16-.5)*2*RAD,z=(j/16-.5)*2*RAD;if(x*x+z*z>RAD*RAD)continue;const h=Hf(OX+x,OZ+z);hmin=Math.min(hmin,h);hmax=Math.max(hmax,h)}
  const dn=h=>hmax>hmin?clamp((hmax-h)/(hmax-hmin),0,1):.5;
@@ -1285,33 +1564,36 @@ function createFlora(T,scene,level,opts){_T=T;const t0=performance.now();
    cur.min[0]=Math.min(cur.min[0],a[0]-r);cur.min[1]=Math.min(cur.min[1],a[1]-.2);cur.min[2]=Math.min(cur.min[2],a[2]-r);cur.max[0]=Math.max(cur.max[0],a[0]+r);cur.max[1]=Math.max(cur.max[1],a[1]+h+.3);cur.max[2]=Math.max(cur.max[2],a[2]+r)});
   avgS/=n;const e1=ud.height*avgS,hiD=(sp.cat==='seagrass'||sp.cat==='algae'?clamp(5+e1*5,5,10):sp.cat==='corals'||sp.cat==='anemones'||sp.cat==='sponges'?clamp(4+e1*5,5,14):clamp(6+e1*5,7,18))*Math.min(Q.lod,1.15)*opts.lodScale,farD=clamp(28+e1*30,30,170)*Q.far*opts.lodScale*(sp.cat==='seagrass'?1.5:1),midD=Math.min(farD,Math.max(hiD*2,(sp.cat==='seagrass'?14:22)*Q.far));
   const mk=(g,lod)=>{const im=new T.InstancedMesh(g,matFor(sp),n);im.instanceMatrix.setUsage(T.DynamicDrawUsage);im.instanceColor=new T.InstancedBufferAttribute(new Float32Array(n*3),3);
-   im.instanceColor.setUsage(T.DynamicDrawUsage);im.count=0;im.visible=false;im.frustumCulled=false;im.name='flora:'+sid+':'+['hi','lo','far'][lod];im.userData.flora=sid;im.userData.lod=lod;im.receiveShadow=true;
-   im.castShadow=shadows&&e1>.35&&!lod;if(im.castShadow)im.customDepthMaterial=depth[sp.cat];root.add(im);return im};
-  const S={id:sid,sp,n,M,Cc,ranges,hi:mk(g0,0),lo:mk(g1,1),far:mk(g2,2),hiD,midD,farD,sig:-1,tris:[ud.tris,g1.userData.tris,g2.userData.tris]};S.ims=[S.hi,S.lo,S.far];species.push(S);
+   im.instanceColor.setUsage(T.DynamicDrawUsage);im.count=0;im.visible=false;im.frustumCulled=false;im.name='flora:'+sid+':'+['hi','lo','far','x'][lod];im.userData.flora=sid;im.userData.lod=lod;im.receiveShadow=true;
+   im.castShadow=shadows&&e1>.35&&(!lod||lod===3);if(im.castShadow)im.customDepthMaterial=depth[sp.cat];root.add(im);return im};
+  const S={id:sid,sp,n,M,Cc,ranges,hi:mk(g0,0),lo:mk(g1,1),far:mk(g2,2),hiD,midD,farD,sig:-1,tris:[ud.tris,g1.userData.tris,g2.userData.tris]};S.ims=[S.hi,S.lo,S.far];if(XQ){const gx=floraGeometryX(T,sid);if(gx.userData.tris>ud.tris){S.x=mk(gx,3);S.ims.push(S.x);S.tris.push(gx.userData.tris);S.xD=Math.min(hiD*.6,9)}}species.push(S);
   ranges.forEach(r=>{let c=chunkMap.get(r.ck);const mn=new T.Vector3(...r.min),mx=new T.Vector3(...r.max);if(!c){c={ck:r.ck,box:new T.Box3(mn,mx),items:[]};chunkMap.set(r.ck,c)}else{c.box.expandByPoint(mn);c.box.expandByPoint(mx)}c.items.push([S,r])})});
  const chunks=[...chunkMap.values()];scene.add(root);
  // ---- chunk frustum culling + distance LOD: copies contiguous per-chunk instance ranges into the hi/lo meshes; uploads only when the visible set changes ----
  const fr=new T.Frustum(),pm=new T.Matrix4(),lastP=new T.Vector3(1e9,0,0),lastQ=new T.Quaternion(),cp=new T.Vector3(),bx=new T.Box3();let frame=0,visChunks=0,lastCull=-99,uploads=0;
  function cull(cam,force){cam.updateMatrixWorld();cp.setFromMatrixPosition(cam.matrixWorld);const moved=cp.distanceTo(lastP)>.6||Math.abs(1-Math.abs(lastQ.dot(cam.quaternion)))>2e-4;if(!force&&!moved&&frame-lastCull<30)return;
   lastCull=frame;lastP.copy(cp);lastQ.copy(cam.quaternion);pm.multiplyMatrices(cam.projectionMatrix,cam.matrixWorldInverse);fr.setFromProjectionMatrix(pm);
-  species.forEach(S=>{S._c=[0,0,0];S._sig=0});visChunks=0;
-  chunks.forEach(c=>{bx.copy(c.box).expandByScalar(shadows?2:.5);if(!fr.intersectsBox(bx))return;const d=c.box.distanceToPoint(cp);visChunks++;
-   c.items.forEach(([S,r])=>{if(d>S.farD)return;const l=d<S.hiD?0:d<S.midD?1:2,im=S.ims[l],o=S._c[l];
+  species.forEach(S=>{S._c=S.ims.map(()=>0);S._sig=0});visChunks=0;
+  chunks.forEach(c=>{bx.copy(c.box).expandByScalar(shadows?2:.5);if(!fr.intersectsBox(bx))return;const d=c.box.distanceToPoint(cp);if(d>viewD)return;visChunks++;
+   c.items.forEach(([S,r])=>{if(d>Math.min(S.farD,viewD))return;const l=S.x&&d<S.xD*xK*xAuto?3:d<S.hiD?0:d<S.midD?1:2,im=S.ims[l],o=S._c[l];
     im.instanceMatrix.array.set(S.M.subarray(r.s*16,(r.s+r.n)*16),o*16);im.instanceColor.array.set(S.Cc.subarray(r.s*3,(r.s+r.n)*3),o*3);
     S._c[l]+=r.n;S._sig=(Math.imul(S._sig,31)+r.s*(l*6+7)+1)|0})});
+  if(XQ){let xt=0;species.forEach(S=>{if(S.x)xt+=S._c[3]*S.x.geometry.userData.tris});xTrisDrawn=xt;if(xt>XB){xAuto=Math.max(.2,xAuto*Math.sqrt(XB/xt)*.92);lastCull=-99}else if(xt<XB*.55&&xAuto<1){xAuto=Math.min(1,xAuto*1.06);lastCull=frame-24}}
   species.forEach(S=>{S.ims.forEach((im,l)=>{im.count=S._c[l];im.visible=S._c[l]>0});if(S._sig!==S.sig||force){S.sig=S._sig;
-   for(let l=0;l<3;l++){const im=S.ims[l],c=S._c[l];if(!c)continue;const a=im.instanceMatrix,b=im.instanceColor;uploads++;
+   for(let l=0;l<S.ims.length;l++){const im=S.ims[l],c=S._c[l];if(!c)continue;const a=im.instanceMatrix,b=im.instanceColor;uploads++;
     if(a.clearUpdateRanges){a.clearUpdateRanges();a.addUpdateRange(0,c*16);b.clearUpdateRanges();b.addUpdateRange(0,c*3)}a.needsUpdate=true;b.needsUpdate=true}}})}
  let buildMs=0;
  const api={id,object:root,quality:qn,uniforms:U,hides,colonies,materials:mats,
-  update(dt,cam,playerPos){frame++;U.uFloraTime.value+=Math.min(dt||0,.1);if(playerPos)U.uFloraPush.value.set(playerPos.x,playerPos.y,playerPos.z,opts.push);if(cam)cull(cam,false)},
+  update(dt,cam,playerPos){frame++;if(XQ){const k=G.ReefX360.lodScale;if(Math.abs(k-xK)>.04){xK=k;lastCull=-99}}U.uFloraTime.value+=Math.min(dt||0,.1);if(playerPos)U.uFloraPush.value.set(playerPos.x,playerPos.y,playerPos.z,opts.push);if(cam)cull(cam,false)},
   refresh(cam){if(cam)cull(cam,true)},
+  // render distance (x360 fog controller): chunks / instances beyond D are not drawn at all; Infinity = off (default)
+  setViewDistance(D){D=D>0?D:Infinity;if(Math.abs(D-viewD)>(viewD===Infinity||D===Infinity?0:1.5)){viewD=D;lastCull=-99}},get viewDistance(){return viewD},setLodScale(k){xK=k;lastCull=-99},x360:XQ,
   setCurrent(x,z){U.uFloraCur.value.set(x,0,z)},setSway(k){U.uFloraSwayK.value=k},setVisible(v){root.visible=!!v},
   isHidden(p,margin){for(const h of hides){if(Math.hypot(p.x-h.x,p.z-h.z)<h.r&&p.y<h.top+(margin||0))return true}return false},
   counts(){const o={total:0,byCat:{},bySpecies:{}};species.forEach(S=>{o.total+=S.n;o.byCat[S.sp.cat]=(o.byCat[S.sp.cat]||0)+S.n;o.bySpecies[S.id]=S.n});return o},
-  stats(){let dc=0,tri=0,vis=0;const lod=[0,0,0];species.forEach(S=>S.ims.forEach((im,l)=>{if(im.count){dc++;tri+=im.count*S.tris[l];vis+=im.count;lod[l]+=im.count}}));
+  stats(){let dc=0,tri=0,vis=0;const lod=[0,0,0,0];species.forEach(S=>S.ims.forEach((im,l)=>{if(im.count){dc++;tri+=im.count*S.tris[l];vis+=im.count;lod[l]+=im.count}}));const lodX=lod.pop();
    const byCat={};species.forEach(S=>{const c=byCat[S.sp.cat]||(byCat[S.sp.cat]={vis:0,tris:0});S.ims.forEach((im,l)=>{c.vis+=im.count;c.tris+=im.count*S.tris[l]})});
-   return{id,quality:qn,lodCounts:lod,byCat,species:species.length,instances:species.reduce((a,S)=>a+S.n,0),visible:vis,drawCalls:dc,triangles:Math.round(tri),chunks:chunks.length,visibleChunks:visChunks,colonies:colonies.length,hides:hides.length,shadows,uploads,buildMs:+buildMs.toFixed(1)}},
+   return{id,quality:qn,lodCounts:lod,lodX,x360:XQ,...(XQ?{xAuto:+xAuto.toFixed(3),xTris:xTrisDrawn,xBudget:XB}:{}),byCat,species:species.length,instances:species.reduce((a,S)=>a+S.n,0),visible:vis,drawCalls:dc,triangles:Math.round(tri),chunks:chunks.length,visibleChunks:visChunks,colonies:colonies.length,hides:hides.length,shadows,uploads,buildMs:+buildMs.toFixed(1)}},
   dispose(){scene.remove(root);species.forEach(S=>S.ims.forEach(im=>im.dispose()));Object.values(mats).forEach(m=>m.dispose());Object.values(depth).forEach(m=>m.dispose());
    if(isL&&level.hides)for(let i=level.hides.length-1;i>=0;i--)if(level.hides[i].flora)level.hides.splice(i,1)}};
  buildMs=performance.now()-t0;return api}
@@ -1324,7 +1606,7 @@ function buildFloraCatalog(T,cat,o){_T=T;o=Object.assign({cols:4,cell:1.6,lod:0,
   const cx=(i%o.cols-(o.cols-1)/2)*o.cell,cz=(Math.floor(i/o.cols)-(rows-1)/2)*o.cell*1.05;m.position.set(cx,0,cz);m.rotation.y=.4;g.add(m);
   labels.push({id:s.id,name:s.name,sci:s.sci,height:ud.height,tris:[ud.tris,floraGeometry(T,s.id,1).userData.tris],pos:new T.Vector3(cx,0,cz+.78),scale:k})});
  return{group:g,labels,species:list,uniforms:U,materials:mats}}
-const API={createFlora,buildFloraCatalog,floraGeometry,floraGeometryDetail,floraTextures,FLORA_SPECIES,FLORA_CATEGORIES:CATS.slice(),FLORA_RECIPES:RECIPES,FLORA_QUALITY:QUAL};
+const API={createFlora,buildFloraCatalog,floraGeometry,floraGeometryDetail,floraGeometryX,floraTextures,FLORA_SPECIES,FLORA_CATEGORIES:CATS.slice(),FLORA_RECIPES:RECIPES,FLORA_QUALITY:QUAL};
 Object.assign(G,API);G.ReefFlora=API;if(typeof module!=='undefined'&&module.exports)module.exports=API;
 })(typeof window!=='undefined'?window:globalThis);
 
@@ -3074,6 +3356,8 @@ function preloadLevelTextures(mgr,id,onProgress,o){return mgr&&mgr.preload?mgr.p
 function buildLevel(THREE,scene,id,opts){'use strict';
 const T=THREE,PI=Math.PI,D=LEVEL_DEFS[id];if(!D)throw new Error('unknown level '+id);
 opts=Object.assign({quality:'high',warm:false,textures:null,buildCreature:(typeof buildCreature==='function'?buildCreature:null),buildFlyingDutchman:(typeof buildFlyingDutchman==='function'?buildFlyingDutchman:null),patch:null,audio:null,seed:0},opts||{});
+// x360 tier (x360.js): opts.quality 'x360' (or opts.x360) = the 'high' level + chunked hi-res terrain with micro relief + >=10x props; never reaches sub-builders as a string
+const XQ=(opts.quality==='x360'||opts.x360===true)&&typeof ReefX360!=='undefined'&&typeof ReefDetail!=='undefined';if(opts.quality==='x360')opts.quality='high';
 const Q=opts.quality==='low'?0:opts.quality==='med'||opts.quality==='medium'?1:2,DECO=[.5,.8,1][Q];
 const clamp=(v,a,b)=>v<a?a:v>b?b:v,lerp=(a,b,t)=>a+(b-a)*t,sstep=(a,b,x)=>{const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t)};
 let seed=1000+LEVEL_IDS.indexOf(id)*7919+(opts.seed|0);const R=()=>{seed=(seed*16807)%2147483647;return (seed-1)/2147483646},RR=(a,b)=>a+R()*(b-a);
@@ -3470,6 +3754,33 @@ const tx=TMgr&&TMgr.gpu?TMgr.getTexture(HDK):opts.textures&&opts.textures[TEXK];
 const terrM=lam({vertexColors:true,map:tx?tx.map:null,normalMap:tx?tx.normalMap:null,emissive:{trench:0x04060c,whalefall:0x030508}[id]||0},{caus:id==='trench'||id==='whalefall'?.1:.6});
 if(tx){const rep=(RAD*2.3)/(TEXK==='rock'?4:8);const sc=m=>{if(!m)return m;const c=m.clone();c.wrapS=c.wrapT=T.RepeatWrapping;c.repeat.set(rep,rep);if(!(c.userData&&c.userData.shared))c.needsUpdate=true;own(c);return c};terrM.map=sc(tx.map);terrM.normalMap=sc(tx.normalMap);if(tx.aoMap&&'aoMap' in terrM){terrM.aoMap=sc(tx.aoMap);terrM.aoMapIntensity=.6}}
 const SEG=[56,84,110][Q];L.terrain=gridMesh(H,RAD*1.15,SEG,terrM);
+if(XQ){L.terrain.visible=false;L.terrainX=xTerrain(H,RAD*1.15,SEG,terrM)}
+// x360 terrain: NC x NC chunks; far = the normal grid resolution, near = 3.3x the segments per axis (~10.7x tris) + micro relief
+// (sand ripples / rock grain), analytic normals from the height function (seam-free), skirts hide LOD cracks; hi chunks are
+// built lazily (max one per frame, nearest first) and swapped by player distance x ReefX360.lodScale
+function xTerrain(fn,ext,seg,mat){const NC=10,cs=seg/NC,HS=Math.round(cs*3.3),size=2*ext/NC,grp=new T.Group();grp.name='terrain-x360';grp.position.set(OX,0,OZ);root.add(grp);
+ const rock=TEXK==='rock',micro=rock?(x,z)=>(fbm(x*.9+3,z*.9-7)-.5)*.16+(vn(x*3.1,z*3.1)-.5)*.05-.05*sstep(.05,0,Math.abs(vn(x*.45+9,z*.45)-.5)):
+  (x,z)=>{const w=.4+.6*vn(x*.07+11,z*.07);return Math.sin((x*.83+z*.56)*6.2+vn(x*.21,z*.21)*4.4)*.035*w+(vn(x*2.3,z*2.3)-.5)*.018};
+ const build=(ci,cj,n,hi)=>{const x0=-ext+ci*size,z0=-ext+cj*size,st=size/n,N1=n+1,R=n+3,hg=new Float32Array(R*R);
+  for(let j=0;j<R;j++)for(let i=0;i<R;i++){const x=x0+(i-1)*st,z=z0+(j-1)*st;let h=fn(x,z);if(h==null)h=D.floor;if(hi)h+=micro(x,z);hg[j*R+i]=h}
+  const sk=hi?4*n:0,nv=N1*N1+sk,P=new Float32Array(nv*3),Nn=new Float32Array(nv*3),Cc=new Float32Array(nv*3),UV=new Float32Array(nv*2);
+  const put=(k,i,j,dy)=>{const x=x0+i*st,z=z0+j*st,h=hg[(j+1)*R+i+1];let nx=hg[(j+1)*R+i]-hg[(j+1)*R+i+2],nz=hg[j*R+i+1]-hg[(j+2)*R+i+1],ny=2*st;const l=Math.hypot(nx,ny,nz);nx/=l;ny/=l;nz/=l;
+   P[k*3]=x;P[k*3+1]=h-dy;P[k*3+2]=z;Nn[k*3]=nx;Nn[k*3+1]=ny;Nn[k*3+2]=nz;const c=colorF(x,z,h,1-Math.abs(ny));Cc[k*3]=c.r;Cc[k*3+1]=c.g;Cc[k*3+2]=c.b;UV[k*2]=(x+ext)/(2*ext);UV[k*2+1]=1-(z+ext)/(2*ext)};
+  for(let j=0;j<N1;j++)for(let i=0;i<N1;i++)put(j*N1+i,i,j,0);const idx=[];
+  for(let j=0;j<n;j++)for(let i=0;i<n;i++){const a=j*N1+i,b=a+N1,c=a+1,d=b+1;idx.push(a,b,c,c,b,d)}
+  if(hi){let k=N1*N1;const ring=[];for(let i=0;i<n;i++)ring.push([i,0]);for(let j=0;j<n;j++)ring.push([n,j]);for(let i=n;i>0;i--)ring.push([i,n]);for(let j=n;j>0;j--)ring.push([0,j]);
+   const dep=rock?.6:.35;ring.forEach(([i,j])=>put(k++,i,j,dep));for(let r=0;r<ring.length;r++){const r2=(r+1)%ring.length,a=ring[r][1]*N1+ring[r][0],b=ring[r2][1]*N1+ring[r2][0],c=N1*N1+r,d=N1*N1+r2;idx.push(a,c,b,b,c,d,a,b,c,b,d,c)}}
+  const g=own(new T.BufferGeometry());g.setAttribute('position',new T.BufferAttribute(P,3));g.setAttribute('normal',new T.BufferAttribute(Nn,3));g.setAttribute('color',new T.BufferAttribute(Cc,3));g.setAttribute('uv',new T.BufferAttribute(UV,2));
+  g.setIndex(nv>65535?new T.BufferAttribute(new Uint32Array(idx),1):new T.BufferAttribute(new Uint16Array(idx),1));g.computeBoundingBox();g.computeBoundingSphere();return g};
+ const C=[];for(let cj=0;cj<NC;cj++)for(let ci=0;ci<NC;ci++){const lo=build(ci,cj,cs,false),m=new T.Mesh(lo,mat);m.userData.noX360=true;m.name='terrain-x:'+ci+','+cj;grp.add(m);
+  C.push({m,lo,hi:null,cx:OX-ext+(ci+.5)*size,cz:OZ-ext+(cj+.5)*size,cy:(lo.boundingBox.min.y+lo.boundingBox.max.y)/2,ci,cj,on:false})}
+ const HD=Math.max(20,size*1.4),api={group:grp,chunks:C,hiSegments:HS,loSegments:cs,chunkSize:size,
+  hiTris:()=>C.length*(HS*HS*2+HS*16),loTris:()=>C.length*cs*cs*2,buildAll(){C.forEach(c=>{if(!c.hi)c.hi=build(c.ci,c.cj,HS,true)})},
+  active:()=>C.filter(c=>c.on).length,
+  update(p){if(!p)return;const k=ReefX360.lodScale||1;let need=null,nd=1e9;for(const c of C){const dx=Math.max(0,Math.abs(p.x-c.cx)-size/2),dz=Math.max(0,Math.abs(p.z-c.cz)-size/2),d=Math.hypot(dx,dz,(p.y-c.cy)*.5),lim=HD*k*(c.on?1.1:.9);
+   if(d<lim){if(c.hi){if(!c.on){c.m.geometry=c.hi;c.on=true}}else if(d<nd){nd=d;need=c}}else if(c.on){c.m.geometry=c.lo;c.on=false}}
+   if(need){need.hi=build(need.ci,need.cj,HS,true)}}};
+ L.updaters.push((dt,t,pl)=>{if(pl&&pl.p)api.update(pl.p)});return api}
 if(ceilF){L.ceilingMesh=gridMesh(ceilF,RAD*1.15,Math.round(SEG*.6),L.flags.iceM||lam({color:0xbfe8ff}),true);L.ceilingMesh.renderOrder=2}
 // ---------- items: one InstancedMesh per type, same {id,type,p,idx,im} shape as the game's items (g5.js) ----------
 const byType={};pending.forEach(it=>(byType[it.type]=byType[it.type]||[]).push(it));L.itemIMs=[];
@@ -3479,7 +3790,7 @@ L.buildMs=performance.now()-tB0;
 // ---------- environment (mood) incl. the warm/night palette ----------
 const NIGHT=[.02,.05,.14];const fog=D.fog.map((v,i)=>warm?lerp(v,NIGHT[i],.72):v);
 L.env={fog,fogColor:new T.Color(fog[0],fog[1],fog[2]),dens:D.dens*(warm?1.15:1),light:D.light*(warm?.55:1),fogNear:{trench:2,whalefall:3,vents:5}[id]||8,fogFar:{trench:55,whalefall:65,vents:80,polar:110,meadow:130}[id]||100,warm};
-function applyEnv(sc,hemi,sun,k){k=k==null?1:k;if(sc&&sc.fog){sc.fog.color.lerp(L.env.fogColor,k);if(sc.background&&sc.background.isColor)sc.background.lerp(L.env.fogColor,k);sc.fog.near=lerp(sc.fog.near,L.env.fogNear,k);sc.fog.far=lerp(sc.fog.far,L.env.fogFar,k)}
+function applyEnv(sc,hemi,sun,k){k=k==null?1:k;if(sc&&sc.fog){(sc.fog.gameColor||sc.fog.color).lerp(L.env.fogColor,k);if(sc.background&&sc.background.isColor)sc.background.lerp(L.env.fogColor,k);sc.fog.near=lerp(sc.fog.near,L.env.fogNear,k);sc.fog.far=lerp(sc.fog.far,L.env.fogFar,k)}
  if(typeof CINE!=='undefined'&&CINE)return;if(hemi)hemi.intensity=lerp(hemi.intensity,1.3*L.env.light+.15,k);if(sun)sun.intensity=lerp(sun.intensity,1.25*L.env.light,k)}
 // ---------- per-frame update: returns movement effects for the game to apply ----------
 const FX={push:new T.Vector3(),lift:0,hidden:false,current:null,geyser:null};
@@ -3512,8 +3823,10 @@ function simulateThreats(dt,pl){for(const P of L.threats){P.t+=dt;P.ang+=dt*P.sp
 function triCount(){let n=0;root.traverse(o=>{if(!o.isMesh||!o.visible)return;const g=o.geometry;const tc=(g.index?g.index.count:g.attributes.position.count)/3;n+=tc*(o.isInstancedMesh?o.count:1)});return Math.round(n)}
 function drawCalls(){let n=0;root.traverse(o=>{if((o.isMesh||o.isPoints)&&o.visible)n+=Array.isArray(o.material)?o.material.length:1});return n}
 function unload(){if(L.ship){try{L.ship.destroy()}catch(e){}}scene.remove(root);root.traverse(o=>{if(o.isInstancedMesh&&o.dispose)o.dispose()});disp.forEach(d=>d.dispose&&d.dispose());disp.length=0;evcbs.length=0;L.unloaded=true}
+if(XQ){try{const XS=ReefX360,t0x=performance.now();L.threats.forEach(P=>{if(P.obj)XS.upgrade(P.obj,{THREE:T,pattern:'skin'})});
+ L.x360=XS.upgrade(root,{THREE:T,pattern:'stone',instanced:true,amp:1.2,exclude:m=>m===L.terrain||m===L.ceilingMesh||m.userData.noX360||(m.material&&(m.material.isShaderMaterial||m.material.isMeshBasicMaterial))});L.x360.terrain={lo:L.terrainX.loTris(),hi:L.terrainX.hiTris()};L.x360ms=performance.now()-t0x}catch(e){console.warn('x360 level',e)}}
 const miniZone={id:D.id,name:D.name,x:OX,z:OZ,r:RAD,danger:D.mini,fog:D.fog};
-return Object.assign(L,{textures:levelTextures(id),hdTextures:!!(TMgr&&TMgr.gpu),update,resolve,height,ceiling,contains,canCollect,collect,collectNear,objective,simulateThreats,applyEnv,unload,triCount,drawCalls,
+return Object.assign(L,{root,textures:levelTextures(id),hdTextures:!!(TMgr&&TMgr.gpu),update,resolve,height,ceiling,contains,canCollect,collect,collectNear,objective,simulateThreats,applyEnv,unload,triCount,drawCalls,
  onEvent(cb){evcbs.push(cb);return()=>{const i=evcbs.indexOf(cb);if(i>=0)evcbs.splice(i,1)}},
  zone:{id:D.id,name:D.name,danger:D.danger,x:OX,z:OZ,r:RAD,floor:D.floor,fog:fog.slice(),dens:L.env.dens,light:L.env.light},miniZone,
  minimap:{world:{minX:OX-RAD*1.15,maxX:OX+RAD*1.15,minZ:OZ-RAD*1.15,maxZ:OZ+RAD*1.15},heightFn:height,zones:[miniZone],colors:Object.fromEntries(Object.entries(ITEM_DEF).map(([k,v])=>[k,v.mini]))},
@@ -4331,7 +4644,7 @@ const cam=new T.PerspectiveCamera(62,1,.2,400);
 const hemi=new T.HemisphereLight(0xcff4ff,0x8a7656,1.3);scene.add(hemi);
 const sun=new T.DirectionalLight(0xfff0d8,1.25);sun.position.set(.3,1,.2);scene.add(sun);
 const lamp=new T.PointLight(0x9fffe6,0,30,1.6);scene.add(lamp);
-const QUAL={low:{dpr:1,fish:.45,deco:.5,far:95,ter:150,cr:'low',snow:900,lod:.7,fl:'low'},med:{dpr:1.6,fish:.9,deco:.95,far:135,ter:200,cr:'medium',snow:1600,lod:1,fl:'medium'},high:{dpr:2.25,fish:1.3,deco:1.35,far:180,ter:260,cr:'high',snow:2600,lod:1.35,fl:'high'},ultra:{dpr:3,fish:1.65,deco:1.75,far:230,ter:320,cr:'high',snow:4000,lod:1.7,fl:'ultra'}};
+const QUAL={low:{dpr:1,fish:.45,deco:.5,far:95,ter:150,cr:'low',snow:900,lod:.7,fl:'low'},med:{dpr:1.6,fish:.9,deco:.95,far:135,ter:200,cr:'medium',snow:1600,lod:1,fl:'medium'},high:{dpr:2.25,fish:1.3,deco:1.35,far:180,ter:260,cr:'high',snow:2600,lod:1.35,fl:'high'},ultra:{dpr:3,fish:1.65,deco:1.75,far:230,ter:320,cr:'high',snow:4000,lod:1.7,fl:'ultra'}};QUAL.x360=Object.assign({},QUAL.ultra);/* x360: manual-only top tier (x360.js wrappers do the upgrade); auto never picks it */
 let qk=S.q==='auto'?'med':S.q,dprCap=QUAL[qk].dpr,dpr=Math.min(devicePixelRatio||1,dprCap);
 function resize(){const w=innerWidth,h=innerHeight;ren.setPixelRatio(dpr);ren.setSize(w,h,false);cam.aspect=w/h;cam.fov=w<h?72:60;cam.updateProjectionMatrix()}
 addEventListener('resize',resize);
@@ -5886,7 +6199,7 @@ function tstRender(){const d=$('pm_test');if(!d)return;const q=(()=>{try{return 
  ${H('⚔ Spawn near you')}<div class="tgrid">${B('sp:shark','🦈 Shark')}${B('sp:bigshark','🦈 Great shark')}${B('sp:baracuda','🐟 Barracuda')}${B('sp:eel','🐍 Moray eel')}${B('sp:fangs','👑 Old Fangs')}${B('sp:gnasher','👑 Gnasher')}${B('sp:clear','🧹 Despawn test enemies')}</div>
  ${H('🍗 '+NN())}<div class="tgrid">${B('nug:on','🍗 Summon buddy')}${B('nug:off','↺ Reset (remove buddy)')}</div>
  ${H('🎵 Music zone test')}<div class="tgrid">${MAINZ.map(id=>B('mus:'+id,'♪ '+ZM[id].name)).join('')}${B('mus:auto','♪ Back to auto')}</div>
- ${H('🖥 Visuals / debug')}<div class="tgrid">${tiers.map(([v,l])=>B('gfx:'+v,(S.gfx||'std')===v?'● '+l:l,(S.gfx||'std')===v?'ton':'')).join('')}${B('fps','FPS overlay: '+(S.fps?'ON':'off'),S.fps?'ton':'')}${B('dbg','Debug overlay: '+(TST.dbg?'ON':'off'),TST.dbg?'ton':'')}</div>
+ ${H('🖥 Visuals / debug')}<div class="tgrid">${tiers.map(([v,l])=>B('gfx:'+v,(S.gfx||'std')===v?'● '+l:l,(S.gfx||'std')===v?'ton':'')).join('')}${[['auto','Auto'],['low','Low'],['med','Med'],['high','High'],['ultra','Ultra'],['x360','X360']].map(([v,l])=>B('dq:'+v,'Detail '+(S.q===v?'● '+l:l),S.q===v?'ton':'')).join('')}${B('fps','FPS overlay: '+(S.fps?'ON':'off'),S.fps?'ton':'')}${B('dbg','Debug overlay: '+(TST.dbg?'ON':'off'),TST.dbg?'ton':'')}</div>
  ${H('🏃 Speed multiplier')}<div class="tgrid">${[1,1.5,2,3,5].map(v=>B('spd:'+v,'×'+v,TST.spd===v?'ton':'')).join('')}</div>
  ${H('💾 Save')}<textarea id="tsave" class="tsel" rows="3" placeholder="Save JSON appears here; paste one to import"></textarea>
  <div class="tgrid">${B('sv:exp','📤 Export / copy')}${B('sv:imp','📥 Import pasted JSON')}${B('sv:wipe',TST.wipeArm>Date.now()?'⚠ Tap again to WIPE':'🗑 Wipe save','tdanger')}</div>
@@ -5912,6 +6225,7 @@ function tstAct(a){{const sl=$('tqsel');if(sl)TST.qsel=sl.value;const ta=$('tsav
  case 'sp':if(v==='clear'){tstDespawn();break}tstGo(()=>tstSpawn(v));return true;
  case 'nug':if(v==='on'){G.nug=1;ensureNug();try{if(NG&&NG.object){NG.object.position.copy(PL.p);NG.object.position.y+=.5}}catch(e){}toast('🍗 '+NN()+' summoned')}else{G.nug=0;applyNugVis();toast('↺ Buddy removed (quest lag3 brings it back)')}saveG();break;
  case 'mus':if(!AU){toast('Audio starts after first tap');break}if(v==='auto'){curZone=null;toast('♪ Music follows zone again')}else{AU.setZone(v);toast('♪ Playing '+ZM[v].name+' bed (until you change zone)')}break;
+ case 'dq':S.q=v;saveS();toast('Reloading for detail '+v+'…');saveG();setTimeout(()=>location.reload(),300);break;
  case 'gfx':S.gfx=v;saveS();toast('Reloading for '+v+'…');saveG();setTimeout(()=>location.reload(),300);break;
  case 'fps':S.fps=!S.fps;saveS();if(!S.fps)$('fps').textContent='';break;
  case 'dbg':TST.dbg=!TST.dbg;tstDbg();break;
@@ -5963,7 +6277,7 @@ let floraFor=null;function floraUpd(dt){housesUpd(dt);if(LV&&LV!==floraFor){flor
 {const _lz=loadZone;loadZone=function(id,st){return _lz.apply(this,arguments)}}
 // ---------- houses (Squid's houses.js) ----------
 let HOUSES=null,LVHOUSES=null,lvHouseFor=null;
-const HQ=()=>qk==='low'?'low':qk==='med'?'medium':qk==='ultra'&&!GFX_MOB?'ultra':'high';
+const HQ=()=>qk==='low'?'low':qk==='med'?'medium':(qk==='ultra'||qk==='x360')&&!GFX_MOB?'ultra':'high';
 function housesInit(){if(typeof placeHouses!=='function')return;try{const pl={};const mk=()=>placeHouses(T,scene,npcs,{quality:HQ(),heightFn:height,textures:TXM||undefined,lights:qk!=='low',placements:pl});
  const bad=h=>{const r=(h.colliders||[]).reduce((m,c)=>Math.max(m,c.r||Math.hypot(c.hx||0,c.hz||0)),3)+2.5;return items.some(it=>Math.hypot(it.p.x-h.position.x,it.p.z-h.position.z)<r)||(npcs[h.id]&&Math.hypot(npcs[h.id].base.x-h.position.x,npcs[h.id].base.z-h.position.z)<4)};
  HOUSES=mk();for(let pass=0;pass<3;pass++){const conf=HOUSES.houses.filter(bad);if(!conf.length)break;
@@ -6000,9 +6314,13 @@ function bindUI(){bindGfx();$('batk').addEventListener('pointerdown',e=>{e.preve
  
  $('sdof').onchange=e=>{S.dof=e.target.checked;saveS();setupDOF()};$('smini').onchange=e=>{S.miniNorth=e.target.checked;saveS();if(MM)MM.setMode(S.miniNorth?'north':'rotate')};$('bresume').onclick=resume;$('bmapx').onclick=resume;$('bendc').onclick=()=>{show('ending',0);state='play';last=performance.now()};
  $('bcp').onclick=()=>{respawn();resume()};$('btitle').onclick=()=>{show('pause',0);show('hud',0);state='title';buildTitle();show('title',1)};
- $('sq').onchange=e=>{S.q=e.target.value;saveS();setQuality()};$('ssnd').onchange=e=>{S.snd=e.target.checked;saveS();if(AU)AU.setMuted(!S.snd)};
+ $('sq').onchange=e=>{S.q=e.target.value;saveS();setQuality();sqUI()};if($('bsqre'))$('bsqre').onclick=()=>{try{if(state==='play')saveG()}catch(e){}location.reload()};$('ssnd').onchange=e=>{S.snd=e.target.checked;saveS();if(AU)AU.setMuted(!S.snd)};
  $('ssens').oninput=e=>{S.sens=+e.target.value;saveS()};$('stsens').oninput=e=>{S.tsens=+e.target.value;saveS()};$('sinv').onchange=e=>{S.inv=e.target.checked;saveS()};['sinvLX','sinvLY','sinvRX','sinvRY'].forEach(id=>{const el=$(id);if(el)el.onchange=e=>{S[id.slice(1)]=e.target.checked;saveS()}});$('sctl').onchange=e=>{S.ctl=e.target.value;saveS();if(S.ctl!=='joy'&&S.ctl!=='dual')askTilt();applyCtlUI()};$('sfps').onchange=e=>{S.fps=e.target.checked;saveS()}}
-function setQuality(){qk=S.q==='auto'?qk:S.q;dprCap=QUAL[qk].dpr;dpr=Math.min(devicePixelRatio||1,dprCap);resize();setupDOF()}
+let X3=null,X3RD=null;
+function X3Boot(){if(qk!=='x360')return;if(!window.ReefX360||typeof ReefDetail==='undefined'){console.warn('x360 unavailable, using ultra');qk='ultra';return}
+ try{X3=ReefX360.install({THREE:T,renderer:ren,scene,camera:cam});ReefX360.setActive(true);X3RD=ReefX360.renderDistance(scene,cam,ren,{tier:'x360'})}catch(e){console.warn('x360 install',e);try{X3RD&&X3RD.disable();ReefX360.setActive(false);X3&&X3.uninstall()}catch(_){}X3=X3RD=null;qk='ultra'}}
+function sqUI(){const r=$('sqre');if(!r)return;const want=S.q==='x360',on=!!X3;r.style.display=want!==on?'block':'none'}
+function setQuality(){if(S.q==='x360'&&!X3){sqUI();return}if(S.q!=='x360'&&X3){sqUI();return}/* x360 on/off needs a rebuild: reload */qk=S.q==='auto'?qk:S.q;dprCap=QUAL[qk].dpr;dpr=Math.min(devicePixelRatio||1,dprCap);resize();setupDOF()}
 // ---------- loop ----------
 let last=performance.now(),wallLast=performance.now(),fpsAcc=0,fpsN=0,fpsShow=0,adaptT=0,titleT=0,playSaveT=0;
 function frame(ts){requestAnimationFrame(frame);
@@ -6023,7 +6341,7 @@ let hudAcc=0,saveT=0,miniF=0,MMzones=[];const MMitems=[],MMthreats=[];
 // ---------- depth of field post pass ----------
 let rt=null,postQ,postS,postC;const dofOn=()=>S.dof==null?qk!=='low':!!S.dof;
 function setupDOF(){if(rt){rt.dispose();rt=null}if(!dofOn())return;const w=Math.round(innerWidth*dpr),h=Math.round(innerHeight*dpr);
- try{rt=new T.WebGLRenderTarget(w,h,{samples:qk==='high'||qk==='ultra'?4:2,depthTexture:new T.DepthTexture(w,h)});rt.texture.colorSpace='';}catch(e){rt=null;return}
+ try{rt=new T.WebGLRenderTarget(w,h,{samples:qk==='high'||qk==='ultra'||qk==='x360'?4:2,depthTexture:new T.DepthTexture(w,h)});rt.texture.colorSpace='';}catch(e){rt=null;return}
  if(!postQ){postC=new T.OrthographicCamera(-1,1,1,-1,0,1);postS=new T.Scene();postQ=new T.Mesh(new T.PlaneGeometry(2,2),new T.ShaderMaterial({uniforms:{tC:{value:null},tD:{value:null},uN:{value:.2},uF:{value:400},uFoc:{value:8},uRes:{value:new T.Vector2()},uMax:{value:3}},depthTest:false,depthWrite:false,
   vertexShader:'varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.,1.);}',
   fragmentShader:`uniform sampler2D tC,tD;uniform float uN,uF,uFoc,uMax;uniform vec2 uRes;varying vec2 vUv;
@@ -6033,7 +6351,7 @@ function setupDOF(){if(rt){rt.dispose();rt=null}if(!dofOn())return;const w=Math.
    for(int i=0;i<10;i++){float an=float(i)*2.39996;float r=sqrt(float(i)+.5)/3.2;vec2 o=vec2(cos(an),sin(an))*r*px*2.2;float kk=coc(vUv+o);vec3 s=texture2D(tC,vUv+o).rgb;a+=s*kk;w+=kk;}c=a/w;}
    gl_FragColor=vec4(pow(c,vec3(1./2.2)),1.);}`}));postS.add(postQ)}
  postQ.material.uniforms.uRes.value.set(w,h)}
-function render(){if(CINE){try{CINE.render(gfxDt);return}catch(e){console.warn('cine render',e);CINE=null;XTR=null;GFX='hd'}}if(rt){ren.setRenderTarget(rt);ren.render(scene,cam);ren.setRenderTarget(null);const u=postQ.material.uniforms;u.tC.value=rt.texture;u.tD.value=rt.depthTexture;u.uN.value=cam.near;u.uF.value=cam.far;u.uFoc.value=cam.position.distanceTo(PL.p);u.uMax.value=2.5*dpr;ren.render(postS,postC)}else ren.render(scene,cam)}
+function render(){if(X3)try{ReefX360.update(cam)}catch(e){console.warn('x360 upd',e)}if(CINE){try{CINE.render(gfxDt);return}catch(e){console.warn('cine render',e);CINE=null;XTR=null;GFX='hd'}}if(rt){ren.setRenderTarget(rt);ren.render(scene,cam);ren.setRenderTarget(null);const u=postQ.material.uniforms;u.tC.value=rt.texture;u.tD.value=rt.depthTexture;u.uN.value=cam.near;u.uF.value=cam.far;u.uFoc.value=cam.position.distanceTo(PL.p);u.uMax.value=2.5*dpr;ren.render(postS,postC)}else ren.render(scene,cam)}
 // ---------- minimap (Squid's module) ----------
 function feedMini(){if(!MM)return;MMitems.length=0;for(const it of items){if(it.type==='shell'&&G.stage!==1)continue;MMitems.push({type:it.type,p:it.p,got:!!G.got[it.id]})}
  MMthreats.length=0;for(const P of preds)if(!(P.dead>0)&&G.size<P.sc*.8)MMthreats.push(P);for(const S2 of schools)if(S2.k==='grouper')for(const f of S2.list)if(f.dead<=0&&f.s>G.size*1.15)MMthreats.push({p:f.p,state:'patrol'});for(const E of eels)MMthreats.push({p:E.base,state:E.st==='lunge'?'chase':'patrol'});
@@ -6059,14 +6377,14 @@ let adaptDown=-99,govHi=0,govLo=0;const QORD=['low','med','high','ultra'];functi
 function adapt(){if(S.q!=='auto'||state!=='play')return;govern();adaptT++;if(adaptT<3)return;if(fpsShow<42&&dpr>.7){dpr=Math.max(.7,dpr-.15);resize();setupDOF();adaptT=0;adaptDown=now}else if(fpsShow>57&&adaptT>=8&&now-(adaptDown||-99)>20&&dpr<Math.min(devicePixelRatio||1,QUAL[qk].dpr)){dpr=Math.min(dpr+.1,Math.min(devicePixelRatio||1,QUAL[qk].dpr));resize();setupDOF();adaptT=0}}
 // ---------- init ----------
 function init(){if(S.q==='auto'){const mob=isTouch;qk=QUAL[S.autoQ]?S.autoQ:(mob?'high':'ultra');if(GFX==='hd'&&mob&&qk==='high'&&!S.autoQ)qk='ultra'}if(P.get('q'))qk=P.get('q');dprCap=QUAL[qk].dpr;dpr=Math.min(devicePixelRatio||1,dprCap);if(P.get('dpr'))dpr=+P.get('dpr');
- resize();gfxInit();try{TX=makeReefTextures(T,qk==='low'?'low':qk==='med'?384:'high')}catch(e){TX=null;console.warn('textures',e)}seed=1234;buildTerrain();buildAtmos();buildDecor();buildWreck();buildSchools();buildPlayer();buildTrail();buildLines();buildPreds();buildEels();buildJellies();buildNPCs();try{if(typeof ReefNPCs!=='undefined'&&ReefNPCs.swapGameNPCs)ReefNPCs.swapGameNPCs(T,npcs,{playerPos:()=>PL.p,camPos:()=>cam.position,talking:slot=>!!(dlg&&dlg.id===slot),quality:qk==='low'?'medium':'high'})}catch(e){console.warn('npc swap',e)}buildItems();buildScrolls();buildMapBase();
+ X3Boot();resize();gfxInit();try{TX=makeReefTextures(T,qk==='low'?'low':qk==='med'?384:'high')}catch(e){TX=null;console.warn('textures',e)}seed=1234;buildTerrain();buildAtmos();buildDecor();buildWreck();buildSchools();buildPlayer();buildTrail();buildLines();buildPreds();buildEels();buildJellies();buildNPCs();try{if(typeof ReefNPCs!=='undefined'&&ReefNPCs.swapGameNPCs)ReefNPCs.swapGameNPCs(T,npcs,{playerPos:()=>PL.p,camPos:()=>cam.position,talking:slot=>!!(dlg&&dlg.id===slot),quality:qk==='low'?'medium':'high'})}catch(e){console.warn('npc swap',e)}buildItems();buildScrolls();buildMapBase();
  const DZ={lagoon:0,garden:1,kelp:1,wreck:2,drop:2,cave:3};MMzones=ZONES.map(z=>Object.assign({},z,{danger:DZ[z.id]!=null?DZ[z.id]:(z.miniDanger||0)}));
  try{MM=createMinimap($('miniwrap'),{size:118,range:70,mode:S.miniNorth?'north':'rotate',heightFn:height,colors:{pearl:'#f4f0ff',shell:'#ff9ac8',plank:'#7dffb0',secret:'#ffd23a',glowstone:'#7affd2',lantern:'#ffe28a',lostpearl:'#ffffff',star:'#ff8a5a',glass:'#7affd8',coin:'#ffd040',rare:'#fff0a0',threat:'#ff4a4a',checkpoint:'#9ff6ff',objective:'#ffd76a',player:'#ff8a2a',npc:'#7ad0ff',other:'#ffffff'}});MM.canvas.addEventListener('pointerdown',e=>e.stopPropagation())}catch(e){MM=null;console.warn('minimap',e)}
  try{NG=createNuggetGuardian(T,scene,PL,{baseRunSpeed:16,size:.8,name:NN(),collectFilter:it=>!G.got[it.id]&&!!it.im&&it.type!=='scroll'&&(it.type!=='shell'||G.stage===1),camera:cam,audio:AU,quality:qk==='low'?'low':'high'});NG.onBlock(P=>{try{qEvent('stun',P)}catch(e){}if(G.perk&&G.perk.stun&&NG.stun)NG.stun(P,(NG.getStats?NG.getStats().stun:3)+G.perk.stun)});if(NG.setCollectTargets){NG.setCollectTargets(()=>items);NG.onCollect(it=>{if(!G.got[it.id])collect(it)})}NG.onBlock(P=>toast('🍗 '+NN()+' blocked the '+(P.name||'attacker')+'!'))}catch(e){NG=null;console.warn('nugget',e)}
  housesInit();try{gfxPost()}catch(e){console.warn(e)}
  initFT();bindInput();bindUI();bindCraft();initCraftState();applyPerks();applyNug();try{if(typeof qMigrate==='function')qMigrate();else if(typeof applyNugVis==='function')applyNugVis()}catch(e){}buildTitle();setupDOF();$('loading').classList.add('hidden');addEventListener('resize',setupDOF);
  if(!G.unlocked[G.skin])G.skin='clown';
- window.__game={get ENG(){return ENG},eels,get engCd(){return engCd},doAttack,disengage,get GFX(){return GFX},get qk(){return qk},get FLORA(){return FLORA},get HOUSES(){return HOUSES},get LVHOUSES(){return LVHOUSES},get dpr(){return dpr},get CINE(){return CINE},get XTR(){return XTR},get TXM(){return TXM},get FT(){return FT},get LV(){return LV},get LVid(){return LVid},loadZone,get FL(){return FL()},get maxFL(){return maxFL()},get S(){return S},get camYaw(){return camYawLag},setCull:v=>{CULL=v},CS,get rinfo(){return {calls:ren.info.render.calls,tris:ren.info.render.triangles}},craft,learn,addInv,summonShip,closeShip,RECIPES,get shipSt(){return shipSt},get shipCd(){return shipCd},set shipCd(v){shipCd=v},wpt:(x,y,z)=>wreckPoint(x,y,z),get G(){return G},PL,IN,npcs,items,preds,start,startDialog,nextLine,openMap,resume,doBoost,doFlip,setStage:s=>{G.stage=s;if(s>=7){G.lantern=true}setObjective()},tp:(x,y,z,yaw)=>{PL._cY=null;PL.p.set(x,y,z);if(yaw!=null)PL.yaw=yaw;camInit=true},get state(){return state},get dlg(){return dlg},get NG(){return NG},schools,gameOver,eatFish,CAVE,WRECK,objPos,height,get fps(){return fpsShow},render:()=>ren.render(scene,cam)};
+ window.__game={get ren(){return ren},get scene(){return scene},get X3(){return X3},get X3RD(){return X3RD},get ENG(){return ENG},eels,get engCd(){return engCd},doAttack,disengage,get GFX(){return GFX},get qk(){return qk},get FLORA(){return FLORA},get HOUSES(){return HOUSES},get LVHOUSES(){return LVHOUSES},get dpr(){return dpr},get CINE(){return CINE},get XTR(){return XTR},get TXM(){return TXM},get FT(){return FT},get LV(){return LV},get LVid(){return LVid},loadZone,get FL(){return FL()},get maxFL(){return maxFL()},get S(){return S},get camYaw(){return camYawLag},setCull:v=>{CULL=v},CS,get rinfo(){return {calls:ren.info.render.calls,tris:ren.info.render.triangles}},craft,learn,addInv,summonShip,closeShip,RECIPES,get shipSt(){return shipSt},get shipCd(){return shipCd},set shipCd(v){shipCd=v},wpt:(x,y,z)=>wreckPoint(x,y,z),get G(){return G},PL,IN,npcs,items,preds,start,startDialog,nextLine,openMap,resume,doBoost,doFlip,setStage:s=>{G.stage=s;if(s>=7){G.lantern=true}setObjective()},tp:(x,y,z,yaw)=>{PL._cY=null;PL.p.set(x,y,z);if(yaw!=null)PL.yaw=yaw;camInit=true},get state(){return state},get dlg(){return dlg},get NG(){return NG},schools,gameOver,eatFish,CAVE,WRECK,objPos,height,get fps(){return fpsShow},render:()=>ren.render(scene,cam)};
  requestAnimationFrame(frame)}
 setTimeout(init,40);
 })();
