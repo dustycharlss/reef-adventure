@@ -1135,7 +1135,8 @@ G.ReefX360=API;if(typeof module!=='undefined'&&module.exports)module.exports=API
 //   -> competition / overgrowth / stacking -> clonal satellites -> items {sid,x,z,s,yaw,tilt,elev,...} + zone map + attractors + debug images.
 // API:
 //   ReefPlace.generate(heightfield, opts)            -> result (synchronous)
-//   ReefPlace.createPlacer(heightfield, opts)        -> {step(ms), done, progress, result, chunkItems(cx,cz)}   (time-sliced)
+//   ReefPlace.generateAsync(heightfield, opts, {budgetMs:4, onProgress, yield, signal}) -> Promise<result>   (== generate(), sliced; never blocks longer than ~budgetMs per slice)
+//   ReefPlace.createPlacer(heightfield, opts)        -> {step(ms), done, progress, result, chunkItems(cx,cz)}   (time-sliced stepper; step(ms) returns done)
 //   ReefPlace.placeReef(THREE, heightfield, opts)    -> result + .layers (THREE.Group of InstancedMesh, needs ReefFlora) + .zoneMap
 //   ReefPlace.ZONES, ReefPlace.SPECIES, ReefPlace.defaults
 //   result: {items, byChunk, colonies, attractors, zones:{w,h,cell,R,names,data}, field(name,x,z), zoneAt(x,z), suit(id,x,z), seagrass(x,z), halo(x,z), flow(x,z), debugImage(mode,o), stats}
@@ -1222,11 +1223,12 @@ function mkPlacer(hf,o0){const o=Object.assign({},DEF,o0||{});if(typeof hf==='ob
  const idx=(x,z)=>clamp(Math.round((z+R)/cs),0,N-1)*N+clamp(Math.round((x+R)/cs),0,N-1);
  const hS=(x,z)=>{const fx=clamp((x+R)/cs,0,N-1.001),fz=clamp((z+R)/cs,0,N-1.001),i=Math.floor(fx),j=Math.floor(fz),u=fx-i,v=fz-j,H=F.h,a=j*N+i;return lerp(lerp(H[a],H[a+1],u),lerp(H[a+N],H[a+N+1],u),v)};
  let hTop=0,hBot=0,vs=1,dTop=o.depth[0],dBot=o.depth[1];
+ const tnow=typeof performance!=='undefined'&&performance.now?()=>performance.now():Date.now;let dl=0;const due=()=>tnow()>=dl;// checkpoints yield only once the current step()'s time budget is spent (never changes the computation, only where it pauses)
  // ---- stages as generator so step(ms) can slice work
  const st={stage:'init',prog:0,done:false,result:null};let gen=null;
  function* run(){
   // 0 heights
-  for(let j=0;j<N;j++){for(let i=0;i<N;i++){const x=-R+i*cs,z=-R+j*cs,k=j*N+i;inside[k]=x*x+z*z<=R*R*1.04?1:0;F.h[k]=hf(OX+x,OZ+z)}if(j%8==7){st.prog=.1*j/N;yield}}
+  for(let j=0;j<N;j++){for(let i=0;i<N;i++){const x=-R+i*cs,z=-R+j*cs,k=j*N+i;inside[k]=x*x+z*z<=R*R*1.04?1:0;F.h[k]=hf(OX+x,OZ+z)}st.prog=.1*j/N;if(due())yield}
   {const hs=[];for(let k=0;k<N*N;k++)if(inside[k])hs.push(F.h[k]);hs.sort((a,b)=>a-b);hBot=hs[Math.floor(hs.length*.02)];hTop=hs[Math.floor(hs.length*.98)];const rng=Math.max(.5,hTop-hBot);vs=Math.min((dBot-dTop)/rng,o.vsMax)}
   const dOf=h=>clamp(dTop+(hTop-h)*vs,.15,70);
   // 1 primary fields
@@ -1243,32 +1245,32 @@ function mkPlacer(hf,o0){const o=Object.assign({},DEF,o0||{});if(typeof hf==='ob
     F.lt[k]=Math.exp(-o.kd*d)*(1-.3*ramp(0,1.5,-F.rel[k]))*(1-.5*ramp(45,80,sl));
     const nz=fbm(seed+5,x*.09,z*.09);F.hd[k]=clamp(.2+.6*ramp(6,22,sl)+.55*ramp(.15,.9,F.rel[k])+.22*ex-.3*ramp(0,.7,-F.rel[k])+(nz-.5)*.6,0,1);
     F.gs[k]=fbm(seed+9,x*o.grassScale+3.1,z*o.grassScale-1.7)}
-   if(j%6==5){st.prog=.1+.3*j/N;yield}}
+   st.prog=.1+.3*j/N;if(due())yield}
   // world3 reef framework: carbonate bommies / ridges (anisotropic blobs) grown on shallow, sheltered-enough ground; they raise relief + hardness so zones and corals follow
   if(o.framework>0){const sp=o.fwSpacing,fr=o.framework,ng=Math.ceil(2*R/sp)+3;const seeds=[];
    for(let a=-1;a<ng;a++)for(let b=-1;b<ng;b++){const sx=-R+(a+hh(seed,a,b,41))*sp,sz=-R+(b+hh(seed,a,b,42))*sp;const k0=idx(sx,sz);const dd=F.dep[k0];if(!(dd>.6&&dd<22&&F.ex[k0]<.66&&F.sl[k0]<30))continue;
     const pz=clamp(fr*(.55+.9*fbm(seed+51,sx*.03,sz*.03))*(F.hd[k0]>.5?1.25:1),0,.97);if(hh(seed,a,b,43)>pz)continue;
     const ro=lerp(o.fwR[0],o.fwR[1],hh(seed,a,b,44)),el=1+1.5*hh(seed,a,b,45),an=hh(seed,a,b,46)*PI;seeds.push({x:sx,z:sz,rx:ro*Math.sqrt(el),rz:ro/Math.sqrt(el),c:Math.cos(an),s:Math.sin(an),h:.75+.25*hh(seed,a,b,47)})}
-   for(let j=0;j<N;j++)for(let i=0;i<N;i++){const k=j*N+i;if(!inside[k])continue;const x=-R+i*cs,z=-R+j*cs;let m=0;
+   for(let j=0;j<N;j++)for(let i=0;i<N;i++){if(i===0&&due())yield;const k=j*N+i;if(!inside[k])continue;const x=-R+i*cs,z=-R+j*cs;let m=0;
     for(const q of seeds){const dx=x-q.x,dz=z-q.z;if(Math.abs(dx)>q.rx*1.5||Math.abs(dz)>q.rx*1.5)continue;const u=(dx*q.c+dz*q.s)/q.rx,v=(-dx*q.s+dz*q.c)/q.rz,d=Math.sqrt(u*u+v*v)*(1+.55*(fbm(seed+53,x*.17,z*.17)-.5));if(d<1)m=Math.max(m,q.h*Math.pow(1-d,.55))}
     const dd=F.dep[k];m*=ramp(.4,1.2,dd)*(1-ramp(18,24,dd))*(1-ramp(.55,.7,F.ex[k]));F.fw[k]=m;if(m>.1){F.rel[k]+=1.15*m;F.hd[k]=Math.max(F.hd[k],.38+.55*m)}}}
   // spur & groove: bands perpendicular to the wave direction (coordinate u along the shore), only on exposed fore-reef slopes
-  {const lam=o.spur.lambda,duty=o.spur.duty;for(let k=0;k<N*N;k++){const x=px(k),z=pz(k),u=x*(-cdz)+z*cdx,wig=(fbm(seed+31,x*.04,z*.04)-.5)*lam*1.3,w=.5+.5*Math.cos(TAU*(u+wig)/lam),amp=ramp(.28,.6,F.ex[k])*ramp(1.5,6,F.dep[k])*(1-ramp(24,40,F.dep[k]))*ramp(3,9,F.sl[k]);
+  {const lam=o.spur.lambda,duty=o.spur.duty;for(let k=0;k<N*N;k++){if(k%N===0&&due())yield;const x=px(k),z=pz(k),u=x*(-cdz)+z*cdx,wig=(fbm(seed+31,x*.04,z*.04)-.5)*lam*1.3,w=.5+.5*Math.cos(TAU*(u+wig)/lam),amp=ramp(.28,.6,F.ex[k])*ramp(1.5,6,F.dep[k])*(1-ramp(24,40,F.dep[k]))*ramp(3,9,F.sl[k]);
     const sp=ramp(1-duty-.12,1-duty+.12,w);F.spur[k]=amp*sp;F.gro[k]=amp*(1-sp)}}
   // 2 patch mask, halo, zones
   for(let k=0;k<N*N;k++)F.pm[k]=(F.rel[k]>.35&&F.hd[k]>.3&&F.ex[k]<.62&&F.dep[k]>.8&&F.dep[k]<18)?1:0;
-  {const hr=Math.max(1,Math.round(o.halo/cs));for(let j=0;j<N;j++){for(let i=0;i<N;i++){const k=j*N+i;let best=0;for(let b=-hr;b<=hr;b+=1)for(let a=-hr;a<=hr;a+=1){const d=Math.hypot(a,b);if(d>hr)continue;const q=clamp(j+b,0,N-1)*N+clamp(i+a,0,N-1);if(F.pm[q])best=Math.max(best,1-d/(hr+.01))}F.halo[k]=best}if(j%8==7){st.prog=.4+.1*j/N;yield}}}
+  {const hr=Math.max(1,Math.round(o.halo/cs));for(let j=0;j<N;j++){for(let i=0;i<N;i++){const k=j*N+i;let best=0;for(let b=-hr;b<=hr;b+=1)for(let a=-hr;a<=hr;a+=1){const d=Math.hypot(a,b);if(d>hr)continue;const q=clamp(j+b,0,N-1)*N+clamp(i+a,0,N-1);if(F.pm[q])best=Math.max(best,1-d/(hr+.01))}F.halo[k]=best}st.prog=.4+.1*j/N;if(due())yield}}
   const cr=3.4;
-  for(let k=0;k<N*N;k++){if(!inside[k]){zone[k]=0;base[k]=0;continue}const d=F.dep[k],sl=F.sl[k],e=F.ex[k],hd=o.floorReef?Math.max(F.hd[k],o.floorReef):F.hd[k];let zb;
+  for(let k=0;k<N*N;k++){if(k%N===0&&due())yield;if(!inside[k]){zone[k]=0;base[k]=0;continue}const d=F.dep[k],sl=F.sl[k],e=F.ex[k],hd=o.floorReef?Math.max(F.hd[k],o.floorReef):F.hd[k];let zb;
    if(F.pm[k]&&e<.62)zb=Z.patch;else if(d<=cr&&e>=.5&&hd>=.35)zb=Z.crest;else if(d<=2.8&&e<.5&&hd>=.45)zb=Z.flat;else if(d>=14&&hd>.3||sl>=52&&d>6)zb=Z.deep;
    else if(e>=.26&&d>cr*.7&&(sl>=4||d>=5)&&hd>.28)zb=Z.fore;else{const sand=1-hd;if(sand>.5&&d<=15&&sl<10&&e<.55&&F.gs[k]>.5&&!(F.halo[k]>.25))zb=Z.grass;else if(d<=15&&e<.55)zb=Z.lagoon;else zb=Z.sand}
    base[k]=zb;let z=zb;if(zb===Z.fore||zb===Z.deep){if(F.gro[k]>.55)z=Z.groove;else if(F.spur[k]>.45)z=Z.spur}zone[k]=z}
-  st.prog=.55;yield;
+  st.prog=.55;if(due())yield;
   // ---- species layers
   const sizeOf=o.size||(id=>null),wantSp=o.fieldsOnly?[]:o.species?SP.filter(s=>o.species.indexOf(s.id)>=0):SP,zcount=new Float32Array(10);for(let k=0;k<N*N;k++)if(inside[k])zcount[base[k]]++,zone[k]>6&&zcount[zone[k]]++;
   const dens=o.density;const L=[];
   // optional species cap: keep the maxSpecies with the largest expected abundance (sum of suitability x density over the grid) - bounds draw calls downstream
-  let keepSp=null;if(o.maxSpecies&&wantSp.length>o.maxSpecies){const mass=wantSp.map(s=>{const zw=new Float32Array(10);for(const n in s.zw)zw[Z[n]]=s.zw[n];let m=0;const tmp={s,zw,sd:seed+wantSp.indexOf(s)*131};for(let k=0;k<N*N;k+=3){if(!inside[k])continue;const zn=zone[k];let w=zn===Z.spur?Math.max(zw[Z.spur],zw[base[k]]*1.4):zw[zn];if(!(w>0))continue;m+=w*trap(F.dep[k],s.d)*(s.e?trap(F.ex[k],s.e):1)*(s.sl?trap(F.sl[k],s.sl):1)*(s.h>0?ramp(s.h-.3,s.h+.05,F.hd[k]):1)}return{s,m:m*s.dn*s.r*s.r*(s.cls==='alga'?.4:1)}});mass.sort((a,b)=>b.m-a.m);keepSp=new Set(mass.slice(0,o.maxSpecies).filter(q=>q.m>0).map(q=>q.s.id));}
+  let keepSp=null;if(o.maxSpecies&&wantSp.length>o.maxSpecies){const mass=[];for(const s of wantSp){if(due())yield;const zw=new Float32Array(10);for(const n in s.zw)zw[Z[n]]=s.zw[n];let m=0;const tmp={s,zw,sd:seed+wantSp.indexOf(s)*131};for(let k=0;k<N*N;k+=3){if(!inside[k])continue;const zn=zone[k];let w=zn===Z.spur?Math.max(zw[Z.spur],zw[base[k]]*1.4):zw[zn];if(!(w>0))continue;m+=w*trap(F.dep[k],s.d)*(s.e?trap(F.ex[k],s.e):1)*(s.sl?trap(F.sl[k],s.sl):1)*(s.h>0?ramp(s.h-.3,s.h+.05,F.hd[k]):1)}mass.push({s,m:m*s.dn*s.r*s.r*(s.cls==='alga'?.4:1)})}mass.sort((a,b)=>b.m-a.m);keepSp=new Set(mass.slice(0,o.maxSpecies).filter(q=>q.m>0).map(q=>q.s.id));}
   wantSp.forEach((s,si)=>{if(keepSp&&!keepSp.has(s.id))return;const zw=new Float32Array(10);for(const n in s.zw)zw[Z[n]]=s.zw[n];if(!(s.zw.groove!=null))zw[Z.groove]=0;zw[Z.spur]=Math.max(s.zw.spur||0,0);let act=false;for(let q=0;q<10;q++)if(zw[q]>0&&(zcount[q]>0||q===Z.spur))act=true;if(!act&&!s.zw.spur)return;
    const sz=sizeOf(s.id)||{},r0=sz.radius||s.r,s0=s.sc[0],s1=s.sc[1],rmax=r0*s1*1.25,rav=r0*(s0+s1)/2,pk=o.pack*(s.pm||PKC[s.cls]||1),g=clamp(Math.sqrt(45/Math.max(.02,o.density*s.dn*pk)),o.minG,2.4);
    const lay={s,si,zw,r0,rmax,g,pk,order:L.length,sd:seed+si*131,cells:new Map(),sat:null,satMax:0};L.push(lay);
@@ -1286,7 +1288,7 @@ function mkPlacer(hf,o0){const o=Object.assign({},DEF,o0||{});if(typeof hf==='ob
   // composition (share of live cover): massive .28, branching .24, plate/table .12, encrusting/foliose .18, understory crusts/mats .18; one species never exceeds 40% of its class
   let coralMul=1;const CSH={massive:.28,branch:.24,plate:.12,enc:.18,under:.18};
   if(o.cover>0&&L.length){const lays0=L.filter(l=>!l.isSat&&CORAL[l.s.cls]),E=new Map(lays0.map(l=>[l,0]));let cnt=0;
-   for(let k=0;k<N*N;k+=2){if(!inside[k])continue;const zn=base[k];if(!(zn===Z.patch||zn===Z.crest||zn===Z.fore||zn===Z.deep||zn===Z.flat))continue;cnt++;const x=px(k),zz=pz(k);
+   for(let k=0;k<N*N;k+=2){if(k%N<2&&due())yield;if(!inside[k])continue;const zn=base[k];if(!(zn===Z.patch||zn===Z.crest||zn===Z.fore||zn===Z.deep||zn===Z.flat))continue;cnt++;const x=px(k),zz=pz(k);
     for(const l of lays0){const S=suit(l,x,zz);if(S<.08)continue;const r=l.r0*(l.s.sc[0]*.55+l.s.sc[1])/2*.9*(l.s.under?1:o.sizeK),cl=l.s.cl;E.set(l,E.get(l)+dens*l.s.dn*S*Math.PI*r*r/100*(1+(cl?(cl.n[0]+cl.n[1])/2*cl.sh*cl.sh*.5:0)))}}
    if(cnt>0){const grp={};for(const l of lays0){const c=l.s.under?'under':l.s.cls;(grp[c]=grp[c]||[]).push(l)}
     for(const c in grp){const ls=grp[c];let tot=0;ls.forEach(l=>tot+=E.get(l)/cnt);if(!(tot>0))continue;const cap=.4*tot;let tot2=0;ls.forEach(l=>{l._e=Math.min(E.get(l)/cnt,cap);tot2+=l._e});
@@ -1326,29 +1328,32 @@ function mkPlacer(hf,o0){const o=Object.assign({},DEF,o0||{});if(typeof hf==='ob
    const cx=(x0+x1)/2,cz=(z0+z1)/2,rad=Math.hypot(x1-x0,z1-z0)/2,buf=[];near(lay,cx,cz,rad,buf);for(const c of buf){if(c.x<x0||c.x>=x1||c.z<z0||c.z>=z1)continue;if(accepted(c))out.push(mkItem(c))}return out}
   // time-sliced full run: chunk by chunk
   const nch=Math.ceil(2*R/CH);let cnt=0;
-  for(let cj=0;cj<nch;cj++){for(let ci=0;ci<nch;ci++){const x0=-R+ci*CH,z0=-R+cj*CH,arr=[];for(const lay of L)layerItems(lay,x0,z0,x0+CH,z0+CH,arr);const kk=ci+','+cj;byChunk.set(kk,arr);for(const it of arr)items.push(it)}
-   st.prog=.55+.4*cj/nch;yield}
+  for(let cj=0;cj<nch;cj++){for(let ci=0;ci<nch;ci++){if(due())yield;const x0=-R+ci*CH,z0=-R+cj*CH,arr=[];for(const lay of L){if(due())yield;layerItems(lay,x0,z0,x0+CH,z0+CH,arr)}const kk=ci+','+cj;byChunk.set(kk,arr);for(const it of arr)items.push(it)}
+   st.prog=.55+.4*cj/nch}
+  if(due())yield;
   // cap by priority if over budget (keeps highest suitability, deterministic)
   if(items.length>o.maxItems){{const vw=it=>it.cls==='rock'?1e3+it.r:it.r*it.r*(.5+it.S);items.sort((a,b)=>vw(b)-vw(a))};items.length=o.maxItems;{const keep=new Set(items);byChunk.forEach((arr,k)=>{if(arr.some(it=>!keep.has(it)))byChunk.set(k,arr.filter(it=>keep.has(it)))})}}
+  st.prog=.95;if(due())yield;
   // colonies (for flora API compat): structural colonies; attractors: tall / complex structure that draws fish
-  const attr=[];items.forEach(it=>{const s=SPD[it.sid];const vol=(((sizeOf(it.sid)||{}).height)||s.hgt)*it.s*it.r*it.r;if(s.cls==='branch'&&it.r>.35||s.cls==='massive'&&it.r>.8||it.sid==='giant-barrel-sponge'||it.sid==='table-coral'&&it.elev>.2||it.sid==='elkhorn-coral')attr.push({x:it.x,z:it.z,r:it.r,sid:it.sid,w:vol})});
-  attr.sort((a,b)=>b.w-a.w);const merged=[];for(const a of attr){const m=merged.find(b=>hit(a.x-b.x,a.z-b.z)<3);if(m){m.w+=a.w;m.n++}else merged.push({x:a.x,z:a.z,r:a.r,w:a.w,n:1,sid:a.sid})}
+  const attr=[];st.prog=.955;if(due())yield;items.forEach(it=>{const s=SPD[it.sid];const vol=(((sizeOf(it.sid)||{}).height)||s.hgt)*it.s*it.r*it.r;if(s.cls==='branch'&&it.r>.35||s.cls==='massive'&&it.r>.8||it.sid==='giant-barrel-sponge'||it.sid==='table-coral'&&it.elev>.2||it.sid==='elkhorn-coral')attr.push({x:it.x,z:it.z,r:it.r,sid:it.sid,w:vol})});
+  attr.sort((a,b)=>b.w-a.w);const merged=[];let nA=0;for(const a of attr){if((++nA&63)===0&&due())yield;const m=merged.find(b=>hit(a.x-b.x,a.z-b.z)<3);if(m){m.w+=a.w;m.n++}else merged.push({x:a.x,z:a.z,r:a.r,w:a.w,n:1,sid:a.sid})}
   const attractors=merged.filter(m=>m.n>=2||m.w>.5).slice(0,40).map(m=>({x:m.x,z:m.z,r:Math.max(1.2,m.r*1.6+Math.sqrt(m.n)*.6),strength:+Math.min(1,m.w/2).toFixed(2),n:m.n}));
+  if(due())yield;
   // patch-reef / reef colonies list for the flora API (mounds of structural corals)
   const cmap=new Map();items.forEach(it=>{if(it.cls==='massive'||it.cls==='branch'||it.cls==='plate'){const k=Math.floor(it.x/10)+','+Math.floor(it.z/10),c=cmap.get(k)||{x:0,z:0,n:0,r:0};c.x+=it.x;c.z+=it.z;c.n++;c.r=Math.max(c.r,it.r);cmap.set(k,c)}});
   cmap.forEach(c=>{if(c.n>=3){const x=c.x/c.n,z=c.z/c.n;colonies.push({lx:x,lz:z,x:OX+x,z:OZ+z,y:hS(x,z),r:Math.max(2,Math.sqrt(c.n)*.9),d:clamp((hTop-hS(x,z))/Math.max(.5,hTop-hBot),0,1)})}});
   const count={};items.forEach(it=>count[it.sid]=(count[it.sid]||0)+1);const zc={};for(let k=0;k<N*N;k++)if(inside[k])zc[ZONES[zone[k]]]=(zc[ZONES[zone[k]]]||0)+1;
   // ---- world3 live-cover measurement: 3x3 sub-samples per grid cell, discs of 0.9 r; rock/rubble counted as framework (bare substrate unless something grows on it)
   const M3=N*3,sub=cs/3,live=new Uint8Array(M3*M3),rockm=new Uint8Array(M3*M3);
-  for(const it of items){const m=it.cls==='rock'?rockm:live,rad=it.r*(it.cls==='rock'?1:.9),i0=Math.max(0,Math.floor((it.x-rad+R)/sub+.5-1)),i1=Math.min(M3-1,Math.ceil((it.x+rad+R)/sub+.5+1)),j0=Math.max(0,Math.floor((it.z-rad+R)/sub+.5-1)),j1=Math.min(M3-1,Math.ceil((it.z+rad+R)/sub+.5+1));
+  let nI=0;for(const it of items){if((++nI&511)===0&&due())yield;const m=it.cls==='rock'?rockm:live,rad=it.r*(it.cls==='rock'?1:.9),i0=Math.max(0,Math.floor((it.x-rad+R)/sub+.5-1)),i1=Math.min(M3-1,Math.ceil((it.x+rad+R)/sub+.5+1)),j0=Math.max(0,Math.floor((it.z-rad+R)/sub+.5-1)),j1=Math.min(M3-1,Math.ceil((it.z+rad+R)/sub+.5+1));
    for(let j=j0;j<=j1;j++)for(let i=i0;i<=i1;i++){const X=-R-cs/2+(i+.5)*sub,Zc=-R-cs/2+(j+.5)*sub;if(hit(X-it.x,Zc-it.z)<=rad)m[j*M3+i]=1}}
   const covLive=new Float32Array(N*N),covRock=new Float32Array(N*N),zs={};
-  for(let j=0;j<N;j++)for(let i=0;i<N;i++){const k=j*N+i;let a=0,b=0;for(let v=0;v<3;v++)for(let u=0;u<3;u++){const q=(j*3+v)*M3+i*3+u;a+=live[q];b+=rockm[q]}covLive[k]=a/9;covRock[k]=b/9;
+  st.prog=.97;for(let j=0;j<N;j++)for(let i=0;i<N;i++){if(i===0&&due())yield;const k=j*N+i;let a=0,b=0;for(let v=0;v<3;v++)for(let u=0;u<3;u++){const q=(j*3+v)*M3+i*3+u;a+=live[q];b+=rockm[q]}covLive[k]=a/9;covRock[k]=b/9;
    if(inside[k]){const zn=ZONES[zone[k]],e=zs[zn]||(zs[zn]={cells:0,live:0,rock:0,bare:0});e.cells++;e.live+=a/9;e.rock+=Math.max(0,b/9-a/9*.5);e.bare+=1-Math.min(1,a/9+b/9*(1-a/9))}}
   for(const n in zs){const e=zs[n];e.live=+(e.live/e.cells).toFixed(3);e.rock=+(e.rock/e.cells).toFixed(3);e.bare=+(e.bare/e.cells).toFixed(3)}
   // potential cover (target) per cell from zone + framework + hardness (used when no items exist, e.g. fieldsOnly low-tier ground tint)
   const ZPOT={patch:.9,crest:.78,fore:.7,spur:.8,deep:.62,flat:.66,lagoon:.28,groove:.06,grass:.03,sand:.0},pot=new Float32Array(N*N);
-  for(let k=0;k<N*N;k++){if(!inside[k])continue;const zn=ZNAME[zone[k]];pot[k]=clamp((ZPOT[zn]||0)*(.5+.5*ramp(.05,.45,F.fw[k]))*(.45+.55*ramp(.2,.6,F.hd[k]))*(.75+.5*(fbm(seed+61,px(k)*.11,pz(k)*.11)-.5)),0,1)}
+  for(let k=0;k<N*N;k++){if(k%N===0&&due())yield;if(!inside[k])continue;const zn=ZNAME[zone[k]];pot[k]=clamp((ZPOT[zn]||0)*(.5+.5*ramp(.05,.45,F.fw[k]))*(.45+.55*ramp(.2,.6,F.hd[k]))*(.75+.5*(fbm(seed+61,px(k)*.11,pz(k)*.11)-.5)),0,1)}
   const bil=(A,x,z)=>{const fx=clamp((x+R)/cs,0,N-1.001),fz=clamp((z+R)/cs,0,N-1.001),i=Math.floor(fx),j=Math.floor(fz),u=fx-i,v=fz-j,a=j*N+i;return lerp(lerp(A[a],A[a+1],u),lerp(A[a+N],A[a+N+1],u),v)};
   // ---- query API
   const FN={fw:F.fw,cover:covLive,rockcover:covRock,potential:pot,depth:F.dep,slope:F.sl,relief:F.rel,exposure:F.ex,current:F.cu,light:F.lt,hard:F.hd,spur:F.spur,groove:F.gro,halo:F.halo,patch:F.pm,grass:F.gs};
@@ -1376,14 +1381,19 @@ function mkPlacer(hf,o0){const o=Object.assign({},DEF,o0||{});if(typeof hf==='ob
   st.result=res;st.done=true;st.prog=1}
  const CLC={branch:[255,235,60],massive:[250,250,250],plate:[40,230,40],enc:[255,130,40],erect:[255,60,60],solit:[0,0,0],soft:[255,80,200],alga:[60,60,60]};function itemCol(it){return CLC[it.cls]||[0,0,0]}
  gen=run();
- return{get done(){return st.done},get progress(){return st.prog},get result(){return st.result},step(ms){const t0=Date.now();while(!st.done){const r=gen.next();if(r.done)break;if(Date.now()-t0>=(ms==null?8:ms))break}return st.done},
+ return{get done(){return st.done},get progress(){return st.prog},get result(){return st.result},step(ms){const t0=tnow(),b=ms==null?8:ms;dl=t0+b;while(!st.done){const r=gen.next();if(r.done)break;if(tnow()-t0>=b)break}return st.done},
   chunkItems(ci,cj){if(!st.done)throw new Error('reefplace: run to completion first (fields are global; item generation is chunk-independent)');return st.result.chunkItems(ci,cj)}}}
 function generate(hf,o){const p=mkPlacer(hf,o||{});while(!p.step(1e9));return p.result}
+// generateAsync(heightfield, opts, {budgetMs=4, onProgress(p01,placer), yield='task'|'raf'|fn()->Promise, signal}) -> Promise<result> (identical to generate() for the same seed; each slice <= ~budgetMs + one checkpoint)
+function generateAsync(hf,o,c){c=c||{};const p=mkPlacer(hf,o||{}),b=c.budgetMs==null?4:c.budgetMs;
+ const wait=typeof c.yield==='function'?c.yield:c.yield==='raf'&&typeof requestAnimationFrame==='function'?()=>new Promise(r=>requestAnimationFrame(()=>r())):
+  typeof MessageChannel==='function'?(()=>{const ch=new MessageChannel(),q=[];ch.port1.onmessage=()=>{const f=q.shift();f&&f()};return()=>new Promise(r=>{q.push(r);ch.port2.postMessage(0)})})():()=>new Promise(r=>setTimeout(r,0));
+ return new Promise((res,rej)=>{const go=()=>{try{if(c.signal&&c.signal.aborted)return rej(new Error('reefplace: aborted'));const d=p.step(b);if(c.onProgress)c.onProgress(d?1:p.progress,p);if(d)return res(p.result);Promise.resolve(wait()).then(go,rej)}catch(e){rej(e)}};go()})}
 function placeReef(T,hf,o){const r=generate(hf,o);const F=G.ReefFlora;if(T&&F&&F.floraGeometry){const grp=new T.Group();grp.name='reefplace';const by={};r.items.forEach(it=>(by[it.sid]=by[it.sid]||[]).push(it));
   const m=new T.MeshStandardMaterial({vertexColors:true,side:T.DoubleSide,roughness:.8});for(const sid in by){const g=F.floraGeometry(T,sid,1),L=by[sid],im=new T.InstancedMesh(g,m,L.length),M=new T.Matrix4(),q=new T.Quaternion(),e=new T.Euler(),p=new T.Vector3(),s=new T.Vector3();
    L.forEach((it,i)=>{e.set(it.tx,it.yaw,it.tz,'YXZ');q.setFromEuler(e);const y=r.heightAt(it.x,it.z)+it.elev-.03*it.s;p.set(it.x+r.origin[0],y,it.z+r.origin[1]);s.setScalar(it.s);M.compose(p,q,s);im.setMatrixAt(i,M)});im.name='reefplace:'+sid;grp.add(im)}r.layers=grp}
  r.zoneMap=r.zones;return r}
-const API={generate,createPlacer:mkPlacer,placeReef,ZONES,ZONE_COLORS:ZCOL,SPECIES:SP,defaults:DEF};
+const API={generate,generateAsync,createPlacer:mkPlacer,placeReef,ZONES,ZONE_COLORS:ZCOL,SPECIES:SP,defaults:DEF};
 G.ReefPlace=API;if(typeof module!=='undefined'&&module.exports)module.exports=API;
 })(typeof window!=='undefined'?window:globalThis);
 
@@ -2078,7 +2088,7 @@ Object.assign(G,API);G.ReefFlora=API;if(typeof module!=='undefined'&&module.expo
 (function(G){'use strict';
 const PI=Math.PI,TAU=PI*2,clamp=(v,a,b)=>v<a?a:v>b?b:v,lerp=(a,b,t)=>a+(b-a)*t,sst=(a,b,x)=>{const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t)};
 const KINDS=['seal','ray','starfish','urchin','snail'];
-const QI={tiny:-1,low:0,medium:1,high:2,ultra:2};//'tiny' = starfish only (collectible swap, ~360 tris)
+const QI={tiny:-1,mini:-2,micro:-3,low:0,medium:1,high:2,ultra:2};//starfish-only collectible tiers: 'tiny' ~360 tris (high), 'mini' ~120 (medium), 'micro' <=60 (low)
 function rng(s){s=(s>>>0)||1;return()=>{s=(s+0x6D2B79F5)>>>0;let t=s;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296}}
 function hsh(x,y,z,s){let h=(Math.imul(Math.floor(x)|0,374761393)+Math.imul(Math.floor(y)|0,668265263)+Math.imul(Math.floor(z)|0,2147483629)+Math.imul(s|0,1274126177))|0;h=Math.imul(h^(h>>>13),1274126177);h^=h>>>16;return(h>>>0)/4294967296}
 function cellN(x,y,z,s){// worley distance (spots)
@@ -2139,10 +2149,11 @@ function finish(T,b,anim){const g=new T.BufferGeometry();g.setAttribute('positio
  if(anim){const w=new Float32Array(b.n());for(let i=0;i<w.length;i++)w[i]=anim(b.P[i*3],b.P[i*3+1],b.P[i*3+2]);g.setAttribute('aW',new T.BufferAttribute(w,1))}
  g.setIndex(b.I);g.computeVertexNormals();g.computeBoundingSphere();g.computeBoundingBox();return g}
 // ---------- the five species ----------
-function starfish(q,o){const R=rng(o.seed||5),b=B(),nA=5,nth=q<0?30:[40,50,70][q],nr=q<0?3:[5,7,9][q],Rc=.1,L=.5,H=.085,ph=R()*TAU;
+function starfish(q,o){const R=rng(o.seed||5),b=B(),nA=5,nth=q===-3?10:q===-2?20:q<0?30:[40,50,70][q],nr=q<0?3:[5,7,9][q],Rc=.1,L=.5,H=.085,ph=q<-1?(R(),0):R()*TAU;// micro/mini: arm tips land on grid columns (ph=0), top nr=2 / underside nr=1
+ const nrS=top=>q===-3||q===-2?(top?2:1):nr;
  const Rf=th=>{const a=Math.pow(Math.abs(Math.cos(nA*(th-ph)/2)),2.6);return Rc+(L-Rc)*a};
  const col=(m,top)=>o.mono?[m,m,m]:mix(top?[.55,.1,.05]:[.85,.62,.4],top?[1,.45,.12]:[.95,.78,.55],m);
- for(const top of[true,false])grid(b,nth,nr,(u,v)=>{const th=u*TAU,Rr=Rf(th),rho=v*Rr,e=1-Math.pow(v,2.2),arm=Math.pow(Math.abs(Math.cos(nA*(th-ph)/2)),2.6);
+ for(const top of[true,false])grid(b,nth,nrS(top),(u,v)=>{const th=u*TAU,Rr=Rf(th),rho=v*Rr,e=1-Math.pow(v,2.2),arm=Math.pow(Math.abs(Math.cos(nA*(th-ph)/2)),2.6);
    const body=H*Math.pow(Math.max(0,e),.55)*(.55+.45*sst(.0,.5,arm)+.25*(1-v))*(top?1:.35);
    const bump=top?.012*(Math.sin(rho*70+hsh(Math.floor(th*9),Math.floor(rho*30),0,3))*.5+.5)*Math.sin(arm*3):0;
    const ridge=top?Math.pow(Math.abs(Math.cos(nA*(th-ph)/2+0)),12)*sst(0,.2,v)*(1-v)*.018:0;
@@ -2222,7 +2233,7 @@ function populate(T,parent,o){o=Object.assign({center:{x:0,z:0},radius:30,counts
  const pick=()=>{for(let k=0;k<20;k++){const a=R()*TAU,d=Math.sqrt(R())*o.radius,x=o.center.x+Math.cos(a)*d,z=o.center.z+Math.sin(a)*d;return{x,z,y:o.heightAt(x,z)}}};
  for(const kind of['starfish','urchin','snail']){const n=(o.counts[kind]|0);if(!n)continue;const geo=geometry(T,kind,{quality:o.quality,seed:3}),mat=makeMat(T,kind,{}),im=new T.InstancedMesh(geo,mat,n),m=new T.Matrix4(),qn=new T.Quaternion(),e=new T.Euler(),sc=new T.Vector3(),ps=new T.Vector3();
   for(let i=0;i<n;i++){const p=pick(),s=(kind==='starfish'?.8+R()*.7:.7+R()*.6)*(o.scale||1);e.set(0,R()*TAU,kind==='snail'?0:(R()-.5)*.1);qn.setFromEuler(e);sc.setScalar(s);ps.set(p.x,p.y-(kind==='starfish'?0:.01),p.z);m.compose(ps,qn,sc);im.setMatrixAt(i,m)}
-  im.instanceMatrix.needsUpdate=true;im.frustumCulled=false;root.add(im);inst.push(im);H.counts[kind]=n;H.tris+=geo.userData.tris*n;H.dc++}
+  im.instanceMatrix.needsUpdate=true;im.computeBoundingSphere();im.frustumCulled=true;root.add(im);inst.push(im);H.counts[kind]=n;H.tris+=geo.userData.tris*n;H.dc++}
  for(const kind of['ray','seal']){const n=(o.counts[kind]|0);for(let i=0;i<n;i++){const p=pick(),cr=build(T,kind,{quality:o.quality,seed:i*5+2,scale:(kind==='ray'?1.1:1.4)*(.85+R()*.3)*(o.scale||1)});root.add(cr);
   const rad=6+R()*10,cx=p.x,cz=p.z,hy=(kind==='ray'?2.8+R()*1.5:1.6+R()*1.4);swim.push({cr,cx,cz,rad,ph:R()*TAU,sp:(kind==='ray'?.09:.07)*(.8+R()*.4)*(R()<.5?1:-1),hy,kind,base:p.y});H.counts[kind]=(H.counts[kind]||0)+1;H.tris+=cr.tris;H.dc++}}
  H.update=t=>{for(const s of swim){const a=s.ph+t*s.sp,x=s.cx+Math.cos(a)*s.rad,z=s.cz+Math.sin(a)*s.rad*.8,fl=o.heightAt(x,z),y=Math.max(fl+s.hy,(o.minY!=null?o.minY:-1e9))+Math.sin(t*.4+s.ph)*.25;
@@ -2332,13 +2343,15 @@ if(typeof module!=='undefined'&&module.exports)module.exports={swapGameEels,unsw
 //   * opts.populate = {center:{x,z},radius,counts:{starfish,urchin,snail,ray,seal},heightAt,seed,quality,parent} also adds ambient fauna via ReefFauna.populate.
 //   * h.update(t) animates populated swimmers (or pass opts.auto:true to drive them from the first swimmer's onBeforeRender).
 // unswapGameFauna() restores the original geometry + material, removes populated fauna, and un-wraps scene.add.
-// opts: {quality:'medium' (populate tier), starfishQuality:'tiny' (collectible tier: ~360 tris vs the game's 10; 'low'/'medium' = 800/1400), starfish:true, populate:null, auto:true, fauna: ReefFauna}
+// opts: {quality:'medium' (populate tier), starfishQuality: default by quality = low 'micro' (60 tris) / medium 'mini' (120) / high 'tiny' (360); the game's own is 10 tris; 'low'/'medium'/'high' = 800/1400/2520, starfish:true, populate:null, auto:true, fauna: ReefFauna}
 (function(G){'use strict';
 const ACTIVE=[],SW=new WeakMap();
 const isStar=o=>{const g=o&&(o.isMesh||o.isInstancedMesh)&&o.geometry;if(!g||!g.attributes||!g.attributes.position)return false;if(g.attributes.position.count!==12||!g.index||g.index.count!==30)return false;
  const p=g.attributes.position;let r=0;for(let i=1;i<12;i++)r=Math.max(r,Math.hypot(p.getX(i),p.getZ(i)));return Math.abs(r-.42)<.02&&Math.abs(p.getY(0)-.05)<.01};
 function swapGameFauna(THREE,target,opts){
- opts=Object.assign({quality:'medium',starfish:true,populate:null,auto:true},opts||{});const T=THREE,F=opts.fauna||G.ReefFauna;if(!F)throw new Error('swapGameFauna: ReefFauna not found (load fauna.js or pass opts.fauna)');
+ opts=Object.assign({quality:'medium',starfish:true,populate:null,auto:true},opts||{});
+ const SFQ={low:'micro',medium:'mini',high:'tiny',ultra:'tiny'};// collectible starfish tier by quality (explicit opts.starfishQuality wins): low <=60 tris, medium ~120, high ~360
+ const sfq=()=>opts.starfishQuality||SFQ[opts.quality]||'tiny';const T=THREE,F=opts.fauna||G.ReefFauna;if(!F)throw new Error('swapGameFauna: ReefFauna not found (load fauna.js or pass opts.fauna)');
  const scene=target&&target.isObject3D?target:target&&target.scene?target.scene:null;if(!scene)throw new Error('swapGameFauna: target must be a Scene/Object3D or have .scene');
  const prev=ACTIVE.find(h=>h.scene===scene);if(prev){prev.scan();return prev}
  const items=[],undo=[];let geo=null;
@@ -2347,9 +2360,15 @@ function swapGameFauna(THREE,target,opts){
   scan(){let n=0;scene.traverse(o=>{if(swap(o))n++});return n},
   dispose(){unswapGameFauna(H)}};
  function swap(o){if(!opts.starfish||SW.has(o)||!isStar(o))return false;
-  if(!geo){geo=F.geometry(T,'starfish',{quality:opts.starfishQuality||'tiny',mono:true,seed:5});geo.scale(.84,.84,.84);geo.computeBoundingSphere();geo.computeBoundingBox()}
+  if(!geo){geo=F.geometry(T,'starfish',{quality:sfq(),mono:true,seed:5});geo.scale(.84,.84,.84);geo.computeBoundingSphere();geo.computeBoundingBox()}
   const rec={mesh:o,geo:o.geometry,mat:o.material,own:null};const m=[].concat(o.material)[0];const c=m.clone();c.vertexColors=true;c.needsUpdate=true;rec.own=c;
-  o.geometry=geo;o.material=c;SW.set(o,rec);items.push(rec);H.count=items.length;return true}
+  rec.fc=o.frustumCulled;o.geometry=geo;o.material=c;cull(o,rec);SW.set(o,rec);items.push(rec);H.count=items.length;return true}
+ // frustum culling: InstancedMesh gets a real bounding sphere (from the instance matrices) that is invalidated whenever the game flags instanceMatrix.needsUpdate, so culling stays correct
+ function cull(o,rec){if(o.frustumCulled===false)o.frustumCulled=true;
+  if(o.isInstancedMesh&&o.instanceMatrix){try{o.computeBoundingSphere()}catch(e){o.frustumCulled=false;return}
+   const im=o.instanceMatrix,had=Object.prototype.hasOwnProperty.call(im,'needsUpdate');
+   Object.defineProperty(im,'needsUpdate',{configurable:true,set(v){if(v===true){this.version++;o.boundingSphere=null}},get(){return undefined}});
+   rec.unc=()=>{if(!had)delete im.needsUpdate;else Object.defineProperty(im,'needsUpdate',{configurable:true,writable:true,value:false})}}}
  function wrap(obj,name,fn){const had=Object.prototype.hasOwnProperty.call(obj,name),orig=obj[name];obj[name]=function(){const r=orig.apply(this,arguments);try{fn.apply(this,arguments)}catch(e){}return r};undo.push(()=>{if(had)obj[name]=orig;else delete obj[name]})}
  H._undo=undo;H._geo=()=>geo;
  H.scan();
@@ -2362,7 +2381,7 @@ function unswapGameFauna(h){
  const hs=h?[h]:ACTIVE.slice();
  for(const H of hs){const i=ACTIVE.indexOf(H);if(i>=0)ACTIVE.splice(i,1);
   for(const u of H._undo.splice(0))u();
-  for(const r of H.items.splice(0)){r.mesh.geometry=r.geo;r.mesh.material=r.mat;r.own.dispose();SW.delete(r.mesh)}
+  for(const r of H.items.splice(0)){r.mesh.geometry=r.geo;r.mesh.material=r.mat;if(r.unc)r.unc();if(r.fc!==undefined)r.mesh.frustumCulled=r.fc;r.own.dispose();SW.delete(r.mesh)}
   if(H._geo()){H._geo().dispose()}
   if(H._auto)H._auto.onBeforeRender=function(){};
   if(H.populated){H.populated.dispose();H.populated=null}
@@ -4933,18 +4952,20 @@ if(tx){const rep=(RAD*2.3)/(TEXK==='rock'?4:8);const sc=m=>{if(!m)return m;const
 const SEG=[46,68,86][Q];L.terrain=gridMesh(H,RAD*1.15,SEG,terrM);
 // world3: ground tint hook (flora/reef cover paints the sand under the colonies so the bed reads continuous): f(x,z,h)->[r,g,b] multiplier on the base vertex colour (level-local x,z)
 L.tintGround=function(f){const g=L.terrain.geometry,c=g.attributes.color,p=g.attributes.position;if(!L._c0)L._c0=c.array.slice();const b=L._c0,A=c.array;for(let i=0;i<p.count;i++){const m=f(p.getX(i),p.getZ(i),p.getY(i));if(m){A[i*3]=b[i*3]*m[0];A[i*3+1]=b[i*3+1]*m[1];A[i*3+2]=b[i*3+2]*m[2]}else{A[i*3]=b[i*3];A[i*3+1]=b[i*3+1];A[i*3+2]=b[i*3+2]}}c.needsUpdate=true};
-if(XQ){L.terrain.visible=false;L.terrainX=xTerrain(H,RAD*1.15,Math.max(110,SEG),terrM)}
+if(XQ){L.terrain.visible=false;L.terrainX=xTerrain(H,RAD*1.15,SEG,terrM)}
+L._xTerrain=xTerrain;
 // x360 terrain: NC x NC chunks; far = the normal grid resolution, near = 3.3x the segments per axis (~10.7x tris) + micro relief
 // (sand ripples / rock grain), analytic normals from the height function (seam-free), skirts hide LOD cracks; hi chunks are
 // built lazily (max one per frame, nearest first) and swapped by player distance x ReefX360.lodScale
-function xTerrain(fn,ext,seg,mat){const NC=10,cs=seg/NC,HS=Math.round(cs*3.3),size=2*ext/NC,grp=new T.Group();grp.name='terrain-x360';grp.position.set(OX,0,OZ);root.add(grp);
+function xTerrain(fn0,ext0,seg0,mat){const NC=10,ext=(Number.isFinite(ext0)&&ext0>0)?ext0:30,cs=Math.max(6,Math.min(24,Math.round((Number.isFinite(seg0)&&seg0>0?seg0:110)/NC))),HS=Math.max(12,Math.round(cs*3.3)),size=2*ext/NC,
+ fn=(x,z)=>{const h=fn0(x,z);return Number.isFinite(h)?h:null},grp=new T.Group();grp.name='terrain-x360';grp.position.set(OX,0,OZ);root.add(grp);
  const rock=TEXK==='rock',micro=rock?(x,z)=>(fbm(x*.9+3,z*.9-7)-.5)*.16+(vn(x*3.1,z*3.1)-.5)*.05-.05*sstep(.05,0,Math.abs(vn(x*.45+9,z*.45)-.5)):
   (x,z)=>{const w=.4+.6*vn(x*.07+11,z*.07);return Math.sin((x*.83+z*.56)*6.2+vn(x*.21,z*.21)*4.4)*.035*w+(vn(x*2.3,z*2.3)-.5)*.018};
  const build=(ci,cj,n,hi)=>{const x0=-ext+ci*size,z0=-ext+cj*size,st=size/n,N1=n+1,R=n+3,hg=new Float32Array(R*R);
-  for(let j=0;j<R;j++)for(let i=0;i<R;i++){const x=x0+(i-1)*st,z=z0+(j-1)*st;let h=fn(x,z);if(h==null)h=D.floor;if(hi)h+=micro(x,z);hg[j*R+i]=h}
+  for(let j=0;j<R;j++)for(let i=0;i<R;i++){const x=x0+(i-1)*st,z=z0+(j-1)*st;let h=fn(x,z);if(h==null)h=D.floor;if(hi)h+=micro(x,z);hg[j*R+i]=Number.isFinite(h)?h:D.floor}
   const sk=hi?4*n:0,nv=N1*N1+sk,P=new Float32Array(nv*3),Nn=new Float32Array(nv*3),Cc=new Float32Array(nv*3),UV=new Float32Array(nv*2);
-  const put=(k,i,j,dy)=>{const x=x0+i*st,z=z0+j*st,h=hg[(j+1)*R+i+1];let nx=hg[(j+1)*R+i]-hg[(j+1)*R+i+2],nz=hg[j*R+i+1]-hg[(j+2)*R+i+1],ny=2*st;const l=Math.hypot(nx,ny,nz);nx/=l;ny/=l;nz/=l;
-   P[k*3]=x;P[k*3+1]=h-dy;P[k*3+2]=z;Nn[k*3]=nx;Nn[k*3+1]=ny;Nn[k*3+2]=nz;const c=colorF(x,z,h,1-Math.abs(ny));Cc[k*3]=c.r;Cc[k*3+1]=c.g;Cc[k*3+2]=c.b;UV[k*2]=(x+ext)/(2*ext);UV[k*2+1]=1-(z+ext)/(2*ext)};
+  const put=(k,i,j,dy)=>{const x=x0+i*st,z=z0+j*st,h=hg[(j+1)*R+i+1];let nx=hg[(j+1)*R+i]-hg[(j+1)*R+i+2],nz=hg[j*R+i+1]-hg[(j+2)*R+i+1],ny=2*st;let l=Math.hypot(nx,ny,nz);if(!(l>1e-9)||!Number.isFinite(l)){nx=0;ny=1;nz=0;l=1}nx/=l;ny/=l;nz/=l;
+   P[k*3]=x;P[k*3+1]=h-dy;P[k*3+2]=z;Nn[k*3]=nx;Nn[k*3+1]=ny;Nn[k*3+2]=nz;const c=colorF(x,z,h,1-Math.abs(ny));Cc[k*3]=Number.isFinite(c.r)?c.r:.5;Cc[k*3+1]=Number.isFinite(c.g)?c.g:.5;Cc[k*3+2]=Number.isFinite(c.b)?c.b:.5;UV[k*2]=(x+ext)/(2*ext);UV[k*2+1]=1-(z+ext)/(2*ext)};
   for(let j=0;j<N1;j++)for(let i=0;i<N1;i++)put(j*N1+i,i,j,0);const idx=[];
   for(let j=0;j<n;j++)for(let i=0;i<n;i++){const a=j*N1+i,b=a+N1,c=a+1,d=b+1;idx.push(a,b,c,c,b,d)}
   if(hi){let k=N1*N1;const ring=[];for(let i=0;i<n;i++)ring.push([i,0]);for(let j=0;j<n;j++)ring.push([n,j]);for(let i=n;i>0;i--)ring.push([i,n]);for(let j=n;j>0;j--)ring.push([0,j]);
@@ -7467,14 +7488,14 @@ function bindGfx(){const sel=$('sgfx');if(!sel)return;sel.addEventListener('chan
  $('bgfxre').addEventListener('click',()=>{try{if(typeof saveG==='function'&&state==='play')saveG()}catch(e){}location.reload()});gfxUI()}
 let FLORA=null;
 let FLORA_PEND=null;
-function floraKill(){FLORA_PEND=null;if(FLORA){try{FLORA.dispose()}catch(e){}FLORA=null}}
+function floraKill(){if(FLORA_PEND&&FLORA_PEND.ac)try{FLORA_PEND.ac.abort()}catch(e){}FLORA_PEND=null;if(FLORA){try{FLORA.dispose()}catch(e){}FLORA=null}}
 function floraBuild(extra){const ex=LVHOUSES&&LVHOUSES.exclusions?LVHOUSES.exclusions():undefined;return createFlora(T,scene,LV,Object.assign({exclude:ex,detail:GFX_MOB?1:undefined,quality:QUAL[qk].fl==='ultra'&&(GFX==='std'||GFX_MOB)?'high':QUAL[qk].fl,textures:TXM||undefined,shadows:!!CINE,hides:true},extra))}
-// reefplace generation is ~0.5-1.2 s (desktop) of synchronous work: capture its arguments, time-slice it over frames with ReefPlace.createPlacer, then build flora with the finished result
+// reefplace generation is ~0.5-1.2 s (desktop) of synchronous work: capture its arguments, run it with ReefPlace.generateAsync (budgetMs 4), then build flora with the finished result
 function floraMake(id){floraKill();if(qk==='low'||typeof createFlora!=='function'||!LV)return;try{
  const RPL=window.ReefPlace;if(RPL&&RPL.createPlacer&&RPL.generate){const g=RPL.generate,STOP={};let cap=null;RPL.generate=function(h,o){cap={h,o};throw STOP};let r=null;
   try{r=floraBuild()}catch(e){if(e!==STOP)throw e}finally{RPL.generate=g}
-  if(cap){FLORA_PEND={id,lv:LV,pl:RPL.createPlacer(cap.h,cap.o)};return}FLORA=r}else FLORA=floraBuild();if(FLORA&&CINE)CINE.upgrade(FLORA.object)}catch(e){console.warn('flora',e);FLORA=null;FLORA_PEND=null}}
-function floraPend(dt){const P=FLORA_PEND;if(!P)return;if(P.lv!==LV||!LV){FLORA_PEND=null;return}try{if(!P.pl.done){P.pl.step(dt<.022?14:6);return}FLORA_PEND=null;FLORA=floraBuild({reefplaceResult:P.pl.result});if(CINE)CINE.upgrade(FLORA.object)}catch(e){console.warn('flora',e);FLORA=null;FLORA_PEND=null}}
+  if(cap){const P={id,lv:LV,res:null,err:null,ac:typeof AbortController==='function'?new AbortController():null};FLORA_PEND=P;(RPL.generateAsync?RPL.generateAsync(cap.h,cap.o,{budgetMs:4,signal:P.ac&&P.ac.signal,yield:window.__rpYield||'task'}):Promise.resolve(RPL.generate(cap.h,cap.o))).then(x=>{P.res=x},e=>{P.err=e});return}FLORA=r}else FLORA=floraBuild();if(FLORA&&CINE)CINE.upgrade(FLORA.object)}catch(e){console.warn('flora',e);FLORA=null;FLORA_PEND=null}}
+function floraPend(dt){const P=FLORA_PEND;if(!P)return;if(P.lv!==LV||!LV){floraKill();return}try{if(P.err)throw P.err;if(!P.res)return;FLORA_PEND=null;FLORA=floraBuild({reefplaceResult:P.res});if(CINE)CINE.upgrade(FLORA.object)}catch(e){console.warn('flora',e);FLORA=null;FLORA_PEND=null}}
 let floraFor=null;function floraUpd(dt){housesUpd(dt);if(LV&&LV!==floraFor){floraFor=LV;gfxLevel(LVid);floraMake(LVid)}if(!LV)floraFor=null;if(FLORA_PEND)floraPend(dt);if(FLORA){if(!LV){floraKill();return}try{FLORA.update(dt,cam,PL.p)}catch(e){console.warn('flora upd',e);floraKill()}}}
 {const _lz=loadZone;loadZone=function(id,st){return _lz.apply(this,arguments)}}
 // ---------- houses (Squid's houses.js) ----------
@@ -7522,7 +7543,8 @@ let X3=null,X3RD=null;
 function X3Boot(){if(qk!=='x360')return;if(!window.ReefX360||typeof ReefDetail==='undefined'){console.warn('x360 unavailable, using ultra');qk='ultra';return}
  try{X3=ReefX360.install({THREE:T,renderer:ren,scene,camera:cam});ReefX360.setActive(true);X3RD=ReefX360.renderDistance(scene,cam,ren,{tier:'x360'})}catch(e){console.warn('x360 install',e);try{X3RD&&X3RD.disable();ReefX360.setActive(false);X3&&X3.uninstall()}catch(_){}X3=X3RD=null;qk='ultra'}}
 function sqUI(){const r=$('sqre');if(!r)return;const want=S.q==='x360',on=!!X3;r.style.display=want!==on?'block':'none'}
-function fxFauna(){/* real starfish collectibles (~360 tris x36, always drawn) only on high+ so low/med stay at the old triangle budget */try{if(qk==='high'||qk==='ultra'||qk==='x360'){if(typeof swapGameFauna==='function')swapGameFauna(T,scene,{starfishQuality:'tiny'})}else if(typeof unswapGameFauna==='function')unswapGameFauna()}catch(e){console.warn('fauna swap',e)}}
+/* FAUNA_LM: micro/mini starfish on low/med cost +1.2%/+1.7% tris in view vs the old 10-tri star (instanced, whole field drawn when its sphere is in frustum), so they stay off to keep the low/med budget; set true to enable */const FAUNA_LM=false;
+function fxFauna(){/* real starfish collectibles; tier by quality (micro/mini/tiny), frustum culled */try{if(typeof unswapGameFauna==='function')unswapGameFauna();if(typeof swapGameFauna==='function'&&(FAUNA_LM||qk==='high'||qk==='ultra'||qk==='x360')){swapGameFauna(T,scene,{quality:qk==='low'?'low':qk==='med'?'medium':qk==='high'?'high':'ultra'})}}catch(e){console.warn('fauna swap',e)}}
 function setQuality(){if(S.q==='x360'&&!X3){sqUI();return}if(S.q!=='x360'&&X3){sqUI();return}/* x360 on/off needs a rebuild: reload */qk=S.q==='auto'?qk:S.q;dprCap=QUAL[qk].dpr;dpr=Math.min(devicePixelRatio||1,dprCap);resize();setupDOF();fxFauna()}
 // ---------- loop ----------
 let last=performance.now(),wallLast=performance.now(),fpsAcc=0,fpsN=0,fpsShow=0,adaptT=0,titleT=0,playSaveT=0;
