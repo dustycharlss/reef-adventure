@@ -1061,26 +1061,31 @@ function renderDistance(scene,camera,renderer,o){const T=TH(o);T0=T;o=Object.ass
  let dome=null;if(o.dome){const g=new T.SphereGeometry(1,32,16);const m=new T.ShaderMaterial({uniforms:{uC:{value:fog.color}},vertexShader:'varying vec3 vD;void main(){vD=position;vec4 p=projectionMatrix*modelViewMatrix*vec4(position,1.);gl_Position=p.xyww;}',
    fragmentShader:'uniform vec3 uC;varying vec3 vD;void main(){float y=normalize(vD).y;vec3 c=uC*(1.+.30*max(y,0.))*(1.-.42*max(-y,0.));gl_FragColor=vec4(c,1.);\n#include <colorspace_fragment>\n}',side:T.BackSide,depthWrite:false,depthTest:false,fog:false});
   dome=new T.Mesh(g,m);dome.renderOrder=-1e9;dome.frustumCulled=false;dome.name='x360:fog-dome';dome.userData.noX360=true;dome.onBeforeRender=(r,s,c)=>{dome.position.setFromMatrixPosition(c.matrixWorld);dome.scale.setScalar(Math.max(1,c.far*.5));dome.updateMatrixWorld()}}
- const st={D:P.max,adapt:1,ema:null,last:0,slow:0,fastT:0,enabled:false,frame:0,calls:0,log:[]};
- const prevOBR=scene.onBeforeRender;const cp=new T.Vector3();
+ const st={D:P.max,adapt:1,ema:null,last:0,slow:0,fastT:0,enabled:false,frame:0,calls:0,lastCalls:0,log:[]};
+ const prevOBR=scene.onBeforeRender,prevOAR=scene.onAfterRender;const cp=new T.Vector3();
  function tint(out,y){const k=clamp((o.surfaceY-y)/(o.surfaceY-o.deepY),0,1);out.copy(srcColor);const hsl={h:0,s:0,l:0};out.getHSL(hsl);
   // bluer: hue toward 0.6, darker: lightness down, but never below minLight (keeps the trench readable)
   const tgtH=.6;let h=hsl.h+(tgtH-hsl.h)*o.blue*k;const l=Math.max(o.minLight,hsl.l*(1-o.dark*k));out.setHSL(h,Math.min(1,hsl.s*(1+.25*k)),l);return out}
  function tick(rn,sc,cam){if(!st.enabled||!cam||!cam.isPerspectiveCamera)return;st.frame++;const now=performance.now();
   if(st.last){const dt=Math.min(250,now-st.last);st.ema=st.ema==null?dt:st.ema+(dt-st.ema)*.06}st.last=now;
-  const info=rn&&rn.info&&rn.info.render;const calls=info?info.calls:0;st.calls=calls;
+  // renderer.info resets at the start of render(), so read last frame's count (sampled in scene.onAfterRender); if the game disables autoReset, the live count is used
+  const info=rn&&rn.info&&rn.info.render;const calls=Math.max(st.lastCalls,info?info.calls:0);st.calls=calls;
   if(o.adaptive&&st.ema!=null&&st.frame>30){const tg=P.target;const over=st.ema>tg*1.25||calls>o.drawCallBudget,under=st.ema<tg*1.06&&calls<o.drawCallBudget*.85;const dts=Math.min(.1,(st.ema||16)/1000);
    if(over){st.slow+=dts;st.fastT=0;if(st.slow>.5)st.adapt=Math.max(P.min/P.max,st.adapt*(1-.08*dts))}else if(under){st.fastT+=dts;st.slow=Math.max(0,st.slow-dts);if(st.fastT>3)st.adapt=Math.min(1,st.adapt*(1+.03*dts))}else{st.slow=Math.max(0,st.slow-dts*.5);st.fastT=0}
    S.lodScale=lerp(.6,1,clamp((st.adapt-P.min/P.max)/(1-P.min/P.max),0,1))}
   const want=clamp(Math.min(wishFar,P.max*st.adapt),P.min*.5,P.max);// smoothed (time constant ~o.fade s): no pulsing
-  const k=1-Math.exp(-Math.min(.1,(st.ema||16)/1000)/o.fade);st.D=st.D+(want-st.D)*k;if(st.D>wishFar)st.D=wishFar;/* noodle: never beyond the game's own fog distance (smoothing lag / start-up) */
+  const k=1-Math.exp(-Math.min(.1,(st.ema||16)/1000)/o.fade);st.D=st.D+(want-st.D)*k;
+  // hard clamp: never past the game's own fog distance (no overshoot while easing at startup / zone change)
+  if(wishFar>0&&st.D>wishFar)st.D=wishFar;
   cp.setFromMatrixPosition(cam.matrixWorld);tint(fog.color,cp.y);bg.copy(fog.color);
   fog.density=FOG_K/st.D;const far=st.D*1.06;if(Math.abs(cam.far-far)>.01){cam.far=far;cam.updateProjectionMatrix()}
   for(const f of o.flora)if(f&&f.setViewDistance)f.setViewDistance(st.D*1.02)}
  const api={get distance(){return st.D},get frameMs(){return st.ema},get adapt(){return st.adapt},get drawCalls(){return st.calls},fog,dome,preset:P,options:o,
   enable(){if(st.enabled)return api;st.enabled=true;scene.fog=fog;scene.background=bg;if(dome)scene.add(dome);
-   scene.onBeforeRender=function(rn,sc,cam,rt){if(prevOBR&&prevOBR!==T.Object3D.prototype.onBeforeRender)prevOBR.call(this,rn,sc,cam,rt);tick(rn,sc,cam)};return api},
-  disable(){if(!st.enabled)return api;st.enabled=false;src&&(src.far=wishFar,src.near=wishNear);scene.fog=src;scene.background=prevBg;if(dome&&dome.parent)dome.parent.remove(dome);scene.onBeforeRender=prevOBR||T.Object3D.prototype.onBeforeRender;S.lodScale=1;
+   scene.onBeforeRender=function(rn,sc,cam,rt){if(prevOBR&&prevOBR!==T.Object3D.prototype.onBeforeRender)prevOBR.call(this,rn,sc,cam,rt);tick(rn,sc,cam)};
+   scene.onAfterRender=function(rn,sc,cam){if(prevOAR&&prevOAR!==T.Object3D.prototype.onAfterRender)prevOAR.call(this,rn,sc,cam);const inf=rn&&rn.info&&rn.info.render;if(inf)st.lastCalls=inf.calls};
+   if(wishFar>0)st.D=Math.min(st.D,wishFar);return api},
+  disable(){if(!st.enabled)return api;st.enabled=false;src&&(src.far=wishFar,src.near=wishNear);scene.fog=src;scene.background=prevBg;if(dome&&dome.parent)dome.parent.remove(dome);scene.onBeforeRender=prevOBR||T.Object3D.prototype.onBeforeRender;scene.onAfterRender=prevOAR||T.Object3D.prototype.onAfterRender;S.lodScale=1;
    if(src&&src.far)camera.far=src.far+2;camera.updateProjectionMatrix();for(const f of o.flora)if(f&&f.setViewDistance)f.setViewDistance(Infinity);return api},
   setTier(t){Object.assign(P,RD_TIERS[t]||P);return api},addFlora(f){if(f&&!o.flora.includes(f))o.flora.push(f);return api},removeFlora(f){const i=o.flora.indexOf(f);if(i>=0)o.flora.splice(i,1);if(f&&f.setViewDistance)f.setViewDistance(Infinity);return api},
   setAdaptive(b){o.adaptive=!!b;if(!b){st.adapt=1;S.lodScale=1}return api},force(D){st.adapt=clamp(D/P.max,0,1);st.D=Math.min(wishFar,D);S.lodScale=lerp(.6,1,clamp((st.adapt-P.min/P.max)/(1-P.min/P.max),0,1));return api},tint:(c,y)=>tint(c||new T.Color(),y),
