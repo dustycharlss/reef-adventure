@@ -790,7 +790,10 @@ function refine(src,ratio,opts){opts=opts||{};const T=opts.THREE||G.THREE;ratio=
  let idx=geo.index?Array.from(geo.index.array):Array.from({length:pos.count},(_,i)=>i);
  const names=Object.keys(geo.attributes),A={};names.forEach(n=>{const a=geo.attributes[n];A[n]={size:a.itemSize,data:Array.from(a.array),norm:a.normalized,type:a.array.constructor}});
  const groups=(geo.groups&&geo.groups.length?geo.groups:[{start:0,count:idx.length,materialIndex:0}]).map(g=>({start:g.start,count:Math.min(g.count,idx.length-g.start),materialIndex:g.materialIndex}));
- const target=Math.round(idx.length/3*ratio),maxPass=opts.passes||4,clampK=opts.clamp==null?.22:opts.clamp;
+ // finRefineW===0: fin triangles (all corners aFin>.5) are left as built and the target is ratio x body + fins
+ const FW0=src.userData&&src.userData.finRefineW===0&&geo.attributes.aFin;let target=Math.round(idx.length/3*ratio);
+ if(FW0){const F=geo.attributes.aFin.array;let nf=0;for(let f=0;f<idx.length;f+=3)if(F[idx[f]]>.5&&F[idx[f+1]]>.5&&F[idx[f+2]]>.5)nf++;target=Math.round(idx.length/3*ratio)}
+ const maxPass=opts.passes||4,clampK=opts.clamp==null?.22:opts.clamp;
  for(let pass=0;pass<maxPass&&idx.length/3<target*.97;pass++){
   const P=A.position.data,N=A.normal.data,nv=P.length/3;
   // weld by position so seams split identically (no cracks)
@@ -798,10 +801,13 @@ function refine(src,ratio,opts){opts=opts||{};const T=opts.THREE||G.THREE;ratio=
   const an=new Float32Array(np*3);for(let i=0;i<nv;i++){an[pid[i]*3]+=N[i*3];an[pid[i]*3+1]+=N[i*3+1];an[pid[i]*3+2]+=N[i*3+2]}
   for(let i=0;i<np;i++){const l=Math.hypot(an[i*3],an[i*3+1],an[i*3+2])||1;an[i*3]/=l;an[i*3+1]/=l;an[i*3+2]/=l}
   const pp=new Float32Array(np*3);for(let i=0;i<nv;i++){pp[pid[i]*3]=P[i*3];pp[pid[i]*3+1]=P[i*3+1];pp[pid[i]*3+2]=P[i*3+2]}
+  // optional: geometry.userData.finRefineW (0..1) lowers the split priority of fin-only edges (aFin>.5) so the body keeps its share
+  const fw=src.userData&&src.userData.finRefineW,pf=fw!=null&&A.aFin?new Uint8Array(np):null;if(pf){const F=A.aFin.data;for(let i=0;i<nv;i++)if(F[i]>.5)pf[pid[i]]=1}
   const ek=(a,b)=>a<b?a*np+b:b*np+a,score=new Map();
   for(let f=0;f<idx.length;f+=3)for(let e=0;e<3;e++){const a=pid[idx[f+e]],b=pid[idx[f+(e+1)%3]];if(a===b)continue;const k=ek(a,b);if(score.has(k))continue;
    const dx=pp[b*3]-pp[a*3],dy=pp[b*3+1]-pp[a*3+1],dz=pp[b*3+2]-pp[a*3+2],L=Math.hypot(dx,dy,dz),d=an[a*3]*an[b*3]+an[a*3+1]*an[b*3+1]+an[a*3+2]*an[b*3+2];
-   score.set(k,L*(1.02-Math.max(-1,Math.min(1,d)))+L*1e-3)}
+   score.set(k,(L*(1.02-Math.max(-1,Math.min(1,d)))+L*1e-3)*(pf&&pf[a]&&pf[b]?fw:1))}
+  if(FW0)for(const[k,v]of score)if(v===0)score.delete(k);
   const need=Math.max(1,Math.ceil((target-idx.length/3)/2)),ks=[...score.entries()].sort((x,y)=>y[1]-x[1]).slice(0,need),split=new Set(ks.map(e=>e[0]));
   const mids=new Map();
   const mid=(a,b)=>{const k=a<b?a+'_'+b:b+'_'+a;let m=mids.get(k);if(m!=null)return m;m=A.position.data.length/3;
@@ -841,8 +847,8 @@ function upgrade(root,o){o=Object.assign({ratio:3,lodDistance:null,minTris:24,lo
 function lodState(root){let hi=0,lo=0;root.traverse(m=>{const L=m.userData&&m.userData.detailLOD;if(L){if(m.geometry===L.hi)hi++;else lo++}});return{hi,lo}}
 const API={refine,upgrade,ratioFor,triCount,lodState};G.ReefDetail=API;if(typeof module!=='undefined'&&module.exports)module.exports=API})(typeof window!=='undefined'?window:globalThis);
 
-}}catch(e){console.warn('detail',e)}
 
+}}catch(e){console.warn('detail',e)}
 // x360.js — 'x360' top graphics tier for the reef adventure (early Xbox 360 class geometry + shading).
 // Standalone, THREE r160 (full or slim/Lambert build: it only patches Lambert/Phong/Standard shaders through
 // onBeforeCompile and the fog ShaderChunks). Needs detail.js (ReefDetail.refine) for the geometry.
@@ -1097,16 +1103,18 @@ function update(cam,o){S.frame++;const T=TH(o);if(!T||!cam)return;for(const r of
 // While active, every build is asked for 'ultra' (or 'high' where that is the module's top) and then upgraded; the raw 'x360'
 // string never reaches a module that doesn't know it (creatures would map it to medium).
 const CREATURE_PAT={shark:'skin',barracuda:'fish',grouper:'fish',eel:'skin',turtle:'shell',octopus:'skin',prey:'fish',player:'fish'};
+// smoothing pass: creature bodies read as smooth wet skin in the reference photos -> only a trace of relief/bump (turtle shell keeps a little more keratin grain)
+const CREATURE_SMOOTH={turtle:{amp:.2,bump:.12,spec:.06,rim:.18},octopus:{amp:.14,bump:.1,spec:.06,rim:.18},_:{amp:.08,bump:.05,spec:.06,rim:.18}},SHRIMP_SMOOTH={amp:.15,bump:.08,rim:.2};
 const NPC_PAT={grouper:'fish',mom:'skin','trench-angler':'skin',octo:'skin','polar-seal':'skin','meadow-manatee':'skin','clams-crab':'shell','whale-crab':'shell','temple-hermit':'shell','vents-shrimp':'shell',bellhop:'skin',turtle:'shell'};
 let installed=null;
 function wants(o){return !!(o&&(o.quality==='x360'||o.x360===true))||(S.active&&!(o&&(o.quality==='low'||o.x360===false)))}
 function norm(o,q){return Object.assign({},o||{},{quality:q,x360:undefined})}
 function install(o){o=o||{};const T=TH(o);T0=T;if(installed)return installed;const W={},w=(obj,name,f)=>{if(obj&&typeof obj[name]==='function'&&!obj[name].__x360){const orig=obj[name];const g=f(orig);g.__x360=true;g.orig=orig;obj[name]=g;W[name]=[obj,orig]}};
- w(G,'buildCreature',orig=>function(TT,kind,op){if(!wants(op))return orig.apply(this,arguments);const r=orig.call(this,TT,kind,norm(op,'ultra'));try{if(!(op&&op.count))upgrade(r.object||r,{THREE:TT,pattern:CREATURE_PAT[kind]||'skin'})}catch(e){console.warn('x360 creature',e)}return r});
+ w(G,'buildCreature',orig=>function(TT,kind,op){if(!wants(op))return orig.apply(this,arguments);const r=orig.call(this,TT,kind,norm(op,'ultra'));try{if(!(op&&op.count))upgrade(r.object||r,Object.assign({THREE:TT,pattern:CREATURE_PAT[kind]||'skin'},CREATURE_SMOOTH[kind]||CREATURE_SMOOTH._))}catch(e){console.warn('x360 creature',e)}return r});
  if(G.ReefNPCs)w(G.ReefNPCs,'buildNPC',orig=>function(TT,id,op){if(!wants(op))return orig.apply(this,arguments);const m=orig.call(this,TT,id,norm(op,'ultra'));try{const b=m.getObjectByName('body')||m;upgrade(b,{THREE:TT,pattern:NPC_PAT[id]||'skin',amp:id==='bellhop'?.12:undefined,bump:id==='bellhop'?0:undefined,lodDistance:((m.userData&&m.userData.radius)||1.5)*9})}catch(e){console.warn('x360 npc',e)}return m});
  w(G,'createNuggetGuardian',orig=>function(TT,sc,pl,op){if(!wants(op))return orig.apply(this,arguments);const N=orig.call(this,TT,sc,pl,norm(op,'ultra'));try{upgrade(N.object||N,{THREE:TT,pattern:'skin',ratio:13.5})}catch(e){}return N});
  w(G,'buildFlyingDutchman',orig=>function(TT,op){if(!wants(op))return orig.apply(this,arguments);const D=orig.call(this,TT,norm(op,'high'));try{upgrade(D.object||D,{THREE:TT,pattern:'wood',lodDistance:60})}catch(e){}return D});
- ['buildShrimp','buildBellhop','buildShellCarriage'].forEach(n=>w(G,n,orig=>function(TT,op){if(!wants(op))return orig.apply(this,arguments);const r=orig.call(this,TT,norm(op,'ultra'));try{upgrade(r.object||r,n==='buildBellhop'?{THREE:TT,pattern:'skin',amp:.12,bump:0}:{THREE:TT,pattern:'shell'})}catch(e){}return r}));
+ ['buildShrimp','buildBellhop','buildShellCarriage'].forEach(n=>w(G,n,orig=>function(TT,op){if(!wants(op))return orig.apply(this,arguments);const r=orig.call(this,TT,norm(op,'ultra'));try{upgrade(r.object||r,n==='buildBellhop'?{THREE:TT,pattern:'skin',amp:.12,bump:0}:Object.assign({THREE:TT,pattern:'shell'},n==='buildShrimp'?SHRIMP_SMOOTH:null))}catch(e){}return r}));
  w(G,'createFastTravel',orig=>function(TT,sc,cam,op){if(!wants(op))return orig.apply(this,arguments);const F=orig.call(this,TT,sc,cam,norm(op,'ultra'));try{const c=F.carriage;if(c)upgrade(c.object||c,{THREE:TT,pattern:'shell',lodDistance:30})}catch(e){console.warn('x360 ft',e)}return F});
  w(G,'placeHouses',orig=>function(TT,sc,npcs,op){if(!wants(op))return orig.apply(this,arguments);const H=orig.call(this,TT,sc,npcs,norm(op,'ultra'));try{(H.houses||[]).forEach(h=>{if(h.hi)upgrade(h.hi,{THREE:TT,pattern:'stone',lodDistance:22,amp:1.3})})}catch(e){console.warn('x360 houses',e)}return H});
  if(G.ReefHouses&&W.placeHouses)G.ReefHouses.placeHouses=G.placeHouses;
@@ -1926,23 +1934,82 @@ const API={placeHouses,buildHouseCatalog,HOUSE_NPCS,HOUSE_THEMES:THEMES};Object.
 function buildCreature(THREE,kind,opts){'use strict';
 opts=opts||{};const T=THREE,PI=Math.PI,clamp=(v,a,b)=>v<a?a:v>b?b:v,sst=(a,b,x)=>{const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t)};
 const UL=opts.quality==='ultra',q=opts.quality==='high'||UL?2:opts.quality==='low'?0:1,QN=UL?'ultra':['low','medium','high'][q],TW=UL?2048:[256,512,1024][q],TH=TW/2,LOD=(qq,a,b,c)=>[a,b,c][qq];
+// fin tessellation per tier: rows root->edge, outline subdivision (low = cheap 3-vertex wedge sections)
+// small fish (prey schools, the clownfish hero) keep wedge sections on phones; big fish get airfoil rows on their large fins (mM: min outline segments)
+const SMF=kind==='prey'||kind==='player',FQ=UL?{rows:SMF?1:2,sub:1,closed:1}:SMF?[{rows:1},{rows:1},{rows:1,closed:1}][q]:[{rows:1,sub:1},{rows:2,sub:1,mM:8},{rows:2,sub:1,mM:6,closed:1}][q];
 const STATES=['cruise','glide','burst','hover','turn','brake','bite','startle','stunned','eat','idle'];
 const C=buildCreature._c||(buildCreature._c=new WeakMap());if(!C.has(T))C.set(T,{});const cache=C.get(T);
 // ---------- geometry builder ----------
-function GB(){const pos=[],uv=[],idx=[],fidx=[],fa=[],fd=[];let LX0=0,LL=1;return{pos,uv,idx,fidx,fa,fd,
- loft(x0,L,NU,NV,prof,Hm,vmap){LX0=x0;LL=L;const b0=pos.length/3;for(let i=0;i<=NU;i++){const s=i/NU,x=x0-L*s,p=prof(s);for(let j=0;j<=NV;j++){const a=j/NV*2*PI,c=Math.cos(a),sn=Math.sin(a);
-   const y=(p.y||0)+(c>0?p.t*c:p.b*c),z=p.w*sn;pos.push(x,y,z);uv.push(.02+.96*(1-s),vmap?vmap(s,c,sn):.08+.82*clamp(.5+y/(2*Hm),0,1));fa.push(0);fd.push(0)}}
-  for(let i=0;i<NU;i++)for(let j=0;j<NV;j++){const a=b0+i*(NV+1)+j,b=a+NV+1;idx.push(a,a+1,b,b,a+1,b+1)}},
- // fin: fan from first point. type auto: paired (has z) =1, tail (root in last 20% of body) =3, median =2
- fin(pts,u0,tipIdx){const b0=pos.length/3,paired=pts.some(p=>Math.abs(p[2]||0)>1e-6),type=paired?1:(pts[0][0]<LX0-LL*.8?3:2);
-  pts.forEach((p,k)=>{const tip=tipIdx&&tipIdx.includes(k);pos.push(p[0],p[1],p[2]||0);uv.push(clamp(u0!=null?u0:.5,0,1),k===0?.925:(tip?.995:.95));fa.push(type);fd.push(k===0?0:tip?1:.55)});
-  for(let k=1;k<pts.length-1;k++)fidx.push(b0,b0+k,b0+k+1)},
- eye(x,y,z,r){const b0=pos.length/3,P=[[x+r,y,z],[x-r,y,z],[x,y+r,z],[x,y-r,z],[x,y,z+r*Math.sign(z)*1.2],[x,y,z-r*Math.sign(z)*.5]];P.forEach(p=>{pos.push(...p);uv.push(.004,.004);fa.push(0);fd.push(0)});
+function GB(){const pos=[],uv=[],idx=[],fidx=[],fa=[],fd=[],ft=[],fr=[],fil=[];let LX0=0,LL=1;
+ const P3=i=>[pos[i*3],pos[i*3+1],pos[i*3+2]],sub3=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],dot3=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+  crs3=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],lrp3=(a,b,k)=>[a[0]+(b[0]-a[0])*k,a[1]+(b[1]-a[1])*k,a[2]+(b[2]-a[2])*k],len3=a=>Math.hypot(a[0],a[1],a[2]);
+ // oriented triangle into the fin index list: face normal must point along w (skips degenerate ones)
+ const tri=(a,b,c,w)=>{if(a===b||b===c||a===c)return;const pa=P3(a),f=crs3(sub3(P3(b),pa),sub3(P3(c),pa));if(len3(f)<1e-14)return;if(dot3(f,w)>=0)fidx.push(a,b,c);else fidx.push(a,c,b)};
+ const G={pos,uv,idx,fidx,fa,fd,ft,fr,fil,FQ:{rows:2,sub:1},RW:0,
+ loft(x0,L,NU,NV,prof,Hm,vmap){LX0=x0;LL=L;const b0=pos.length/3,p0=prof(0),pin=Math.max(p0.t,p0.b,p0.w)<L*1.2e-3;// ring placement: G.RW>0 -> rings spaced by profile turning (curvature-adaptive), mixed RW:1-RW with uniform spacing
+  let SS=null;if(G.RW>0){const K=240,an=[],cum=[0];for(let k=0;k<=K;k++){const q=prof(k/K);an.push([q.t,q.b,q.w,q.y||0])}
+   const th=(k,c)=>Math.atan2(an[Math.min(K,k+1)][c]-an[Math.max(0,k-1)][c],2*L/K*(k>0&&k<K?1:.5));let tot=0;const dd=[];
+   for(let k=0;k<K;k++){let v=0;for(let c=0;c<3;c++)v+=Math.abs(th(k+1,c)-th(k,c));dd.push(v);tot+=v}
+   for(let k=0;k<K;k++)cum.push(cum[k]+(1-G.RW)/K+G.RW*dd[k]/(tot||1));SS=[];for(let i=0;i<=NU;i++){const tg=i/NU*cum[K];let k=0;while(k<K-1&&cum[k+1]<tg)k++;SS.push(clamp((k+(tg-cum[k])/Math.max(1e-12,cum[k+1]-cum[k]))/K,0,1))}}
+  for(let i=0;i<=NU;i++){const s=SS?SS[i]:i/NU,x=x0-L*s,p=prof(s);for(let j=0;j<=NV;j++){const a=j/NV*2*PI,c=Math.cos(a),sn=Math.sin(a);
+   const y=(p.y||0)+(c>0?p.t*c:p.b*c),z=p.w*sn;pos.push(x,y,z);uv.push(.02+.96*(1-s),vmap?vmap(s,c,sn):.08+.82*clamp(.5+y/(2*Hm),0,1));fa.push(0);fd.push(0);ft.push(0);fr.push(0);fil.push(0)}}
+  // a pinched snout ring makes zero-area triangles: drop them (no visual change, frees budget for the fins)
+  for(let i=0;i<NU;i++)for(let j=0;j<NV;j++){const a=b0+i*(NV+1)+j,b=a+NV+1;if(!(i===0&&pin))idx.push(a,a+1,b);idx.push(b,a+1,b+1)}},
+ // volumetric fin: grid from the root (one apex point = fan, or a root row = strip) to the free edge, two surfaces offset +-h/2 along
+ // the fin plane normal. h: thick rounded root (fillet flare), sqrt-like leading edges, thin trailing edges, tapering to the tip; free
+ // edges are shared knife vertices, every other boundary is capped => closed mesh. Both surfaces share aFin/aFinD so the shader
+ // deformation translates them together (thickness preserved). R0 roots, E edge points, ef aFinD at the edge, ev uv.v at the edge,
+ // er edge point lies on the body (root), o: {H, rows, flare, sink(p)->vec, bodyN(p)->unit, hs[i], bias(e,r), endT(t), rays, ridge, v0}
+ tfin(R0,E,ef,ev,er,type,u0,o){o=o||{};const M=E.length-1,fan=R0.length===1,NR=M<(o.mM||0)?1:Math.max(1,o.rows|0),H=o.H||.01,F=o.flare==null?.5:o.flare,rays=o.rays||0,
+   Rt=i=>fan?R0[0]:R0[i],poly=fan?[R0[0],...E]:[...R0,...E.slice().reverse()];let nn=[0,0,0];
+  for(let k=0;k<poly.length;k++){const a=poly[k],b=poly[(k+1)%poly.length];nn[0]+=(a[1]-b[1])*(a[2]+b[2]);nn[1]+=(a[2]-b[2])*(a[0]+b[0]);nn[2]+=(a[0]-b[0])*(a[1]+b[1])}
+  const nl=len3(nn)||1,n=nn.map(v=>v/nl),sl=E.map((e,i)=>len3(sub3(e,Rt(i)))),smax=Math.max(1e-9,...sl);
+  const lam=E.map((e,i)=>{const t=sub3(E[Math.min(M,i+1)],E[Math.max(0,i-1)]);let w=crs3(n,t);if(dot3(w,sub3(e,Rt(i)))<0)w=w.map(v=>-v);const l=len3(w)||1;return clamp(w[0]/l*1.6,0,1)});
+  const ridge=rays&&o.ridge&&M>=2.5*rays?o.ridge:0;
+  const hh=(i,j)=>{const r=j/NR;let h;if(er[i])h=H*(1-.3*r);else{const e=1.25-.8*lam[i],tp=1-.55*sl[i]/smax*r;h=H*Math.pow(1-r,e)*tp*(1+F*Math.pow(1-r,3))/(1+F)}
+   if(o.hs)h*=o.hs[i];if(o.bias)h*=o.bias(E[i],r);if(o.endT)h*=o.endT(i/M);if(ridge&&j>0&&j<NR)h*=1+ridge*Math.cos(2*PI*rays*i/M);return Math.max(0,h)};
+  const Tg=[],Bg=[],Pg=[],RT=[],add=(p,h,s,i,r,w,bn)=>{pos.push(p[0]+n[0]*h*s,p[1]+n[1]*h*s,p[2]+n[2]*h*s);
+   uv.push(clamp((u0!=null?u0:.5)+(i/M-.5)*(o.uw||.02),0,1),(o.v0||.925)+r*(ev[i]-(o.v0||.925)));fa.push(type);fd.push(r*ef[i]);ft.push(clamp(h*2/H,0,1));fr.push(rays*i/M);
+   fil.push(w&&bn?[w,bn[0],bn[1],bn[2]]:0);return pos.length/3-1};
+  for(let i=0;i<=M;i++){Tg[i]=[];Bg[i]=[];Pg[i]=[];for(let j=0;j<=NR;j++){if(fan&&j===0&&i>0){Tg[i][0]=Tg[0][0];Bg[i][0]=Bg[0][0];Pg[i][0]=Pg[0][0];continue}
+    const r=j/NR;let p=lrp3(Rt(i),E[i],r);const rooted=j===0||er[i];if(rooted&&o.sink){const d=o.sink(p,H);p=[p[0]+d[0],p[1]+d[1],p[2]+d[2]]}Pg[i][j]=p;(RT[i]||(RT[i]=[]))[j]=rooted;
+    const h=hh(i,j)/2,dist=r*sl[i],w=rooted?.6:.6*Math.pow(Math.max(0,1-dist/(1.4*H)),2),bn=w>0&&o.bodyN?o.bodyN(p):null;
+    if(h<=H*1e-4&&j===NR){Tg[i][j]=Bg[i][j]=add(p,0,0,i,r,w,bn)}else{Tg[i][j]=add(p,h,1,i,r,w,bn);Bg[i][j]=add(p,h,-1,i,r,w,bn)}}}
+  const m=n.map(v=>-v);
+  for(let i=0;i<M;i++)for(let j=0;j<NR;j++){tri(Tg[i][j],Tg[i+1][j],Tg[i+1][j+1],n);tri(Tg[i][j],Tg[i+1][j+1],Tg[i][j+1],n);tri(Bg[i][j],Bg[i+1][j],Bg[i+1][j+1],m);tri(Bg[i][j],Bg[i+1][j+1],Bg[i][j+1],m)}
+  const rt=(i,j)=>fan&&j===0||RT[i][j],cap=(a,b,w)=>{if(!o.closed&&rt(a[0],a[1])&&rt(b[0],b[1]))return;tri(Tg[a[0]][a[1]],Tg[b[0]][b[1]],Bg[b[0]][b[1]],w);tri(Tg[a[0]][a[1]],Bg[b[0]][b[1]],Bg[a[0]][a[1]],w)};
+  for(let j=0;j<NR;j++){cap([0,j],[0,j+1],sub3(Pg[0][j+1],Pg[1][j+1]));cap([M,j],[M,j+1],sub3(Pg[M][j+1],Pg[M-1][j+1]))}
+  for(let i=0;i<M;i++){cap([i,NR],[i+1,NR],sub3(lrp3(E[i],E[i+1],.5),lrp3(Rt(i),Rt(i+1),.5)));if(!fan)cap([i,0],[i+1,0],sub3(lrp3(Rt(i),Rt(i+1),.5),lrp3(E[i],E[i+1],.5)))}
+  return{n,H}},
+ // fan fin from pts[0] (kept API). o (from specBody): root test, thickness, sink, tier rows / outline subdivision, rays
+ fin(pts,u0,tipIdx,ty,o){o=o||{};const paired=pts.some(p=>Math.abs(p[2]||0)>1e-6),type=ty||paired?ty||1:(pts[0][0]<LX0-LL*.8?3:2);
+  const P=pts.map(p=>[p[0],p[1],p[2]||0]);let E=P.slice(1),ef=E.map((p,k)=>tipIdx&&tipIdx.includes(k+1)?1:.55),ev=ef.map(f=>f>.9?.995:.95),er=E.map(p=>o.root?!!o.root(p):false);
+  const sb=Math.max(1,o.sub|0);if(sb>1&&E.length>2){const E2=[],f2=[],v2=[],r2=[],n=E.length;for(let k=0;k<n-1;k++){const p0=E[Math.max(0,k-1)],p1=E[k],p2=E[k+1],p3=E[Math.min(n-1,k+2)];
+    for(let s=0;s<sb;s++){const t=s/sb,t2=t*t,t3=t2*t;E2.push([0,1,2].map(c=>.5*(2*p1[c]+(-p0[c]+p2[c])*t+(2*p0[c]-5*p1[c]+4*p2[c]-p3[c])*t2+(-p0[c]+3*p1[c]-3*p2[c]+p3[c])*t3)));
+     f2.push(s?Math.min(ef[k],ef[k+1]):ef[k]);v2.push(s?Math.min(ev[k],ev[k+1]):ev[k]);r2.push(s?er[k]&&er[k+1]:er[k])}}
+   E2.push(E[n-1]);f2.push(ef[n-1]);v2.push(ev[n-1]);r2.push(er[n-1]);E=E2;ef=f2;ev=v2;er=r2}
+  return G.tfin([P[0]],E,ef,ev,er,type,u0,o)},
+ // small open cone (nostril tube / caudal spine): base ring centre c (radius r, perpendicular to d) to tip c+d*len; uv fixed texel
+ cone(c,d,r,len,n,u,v){const b0=pos.length/3,l=Math.hypot(d[0],d[1],d[2])||1,w=[d[0]/l,d[1]/l,d[2]/l],a=Math.abs(w[1])<.9?[0,1,0]:[1,0,0],e1=crs3(w,a),k1=len3(e1),f=e1.map(t=>t/k1),g2=crs3(w,f);
+  for(let k=0;k<n;k++){const t=k/n*2*PI,cs=Math.cos(t),sn=Math.sin(t);pos.push(c[0]+(f[0]*cs+g2[0]*sn)*r,c[1]+(f[1]*cs+g2[1]*sn)*r,c[2]+(f[2]*cs+g2[2]*sn)*r);uv.push(u,v);fa.push(0);fd.push(0);ft.push(0);fr.push(0);fil.push(0)}
+  for(let k=0;k<n;k++){pos.push(c[0]+w[0]*len,c[1]+w[1]*len,c[2]+w[2]*len);uv.push(u,v);fa.push(0);fd.push(0);ft.push(0);fr.push(0);fil.push(0)}
+  for(let k=0;k<n;k++)idx.push(b0+k,b0+(k+1)%n,b0+n+k)},
+ eye(x,y,z,r){const b0=pos.length/3,P=[[x+r,y,z],[x-r,y,z],[x,y+r,z],[x,y-r,z],[x,y,z+r*Math.sign(z)*1.2],[x,y,z-r*Math.sign(z)*.5]];P.forEach(p=>{pos.push(...p);uv.push(.004,.004);fa.push(0);fd.push(0);ft.push(0);fr.push(0);fil.push(0)});
   [[0,2,4],[2,1,4],[1,3,4],[3,0,4],[2,0,5],[1,2,5],[3,1,5],[0,3,5]].forEach(f=>idx.push(b0+f[0],b0+f[1],b0+f[2]))},
  geo(extra){const g=new T.BufferGeometry();g.setAttribute('position',new T.Float32BufferAttribute(pos,3));g.setAttribute('uv',new T.Float32BufferAttribute(uv,2));
   g.setAttribute('aFin',new T.Float32BufferAttribute(fa,1));g.setAttribute('aFinD',new T.Float32BufferAttribute(fd,1));
+  if(ft.length===pos.length/3){g.setAttribute('aFinT',new T.Float32BufferAttribute(ft,1));g.setAttribute('aRay',new T.Float32BufferAttribute(fr,1))}
   if(extra)for(const k in extra)g.setAttribute(k,new T.Float32BufferAttribute(extra[k],1));g.setIndex(idx.concat(fidx));g.addGroup(0,idx.length,0);if(fidx.length)g.addGroup(idx.length,fidx.length,1);
-  g.computeVertexNormals();g.computeBoundingSphere();return g}}}
+  g.computeVertexNormals();weldBodyN(g,fa);
+  // root fillet: fin normals near the body lean toward the body normal, so the fin flares into the flank without a shading seam
+  if(fil.length===pos.length/3){const nr=g.attributes.normal.array;for(let i=0;i<fil.length;i++){const f=fil[i];if(!f)continue;const w=f[0];let x=nr[i*3]*(1-w)+f[1]*w,y=nr[i*3+1]*(1-w)+f[2]*w,z=nr[i*3+2]*(1-w)+f[3]*w;
+    if(x*nr[i*3]+y*nr[i*3+1]+z*nr[i*3+2]<0){x=nr[i*3];y=nr[i*3+1];z=nr[i*3+2]}const l=Math.hypot(x,y,z)||1;nr[i*3]=x/l;nr[i*3+1]=y/l;nr[i*3+2]=z/l}}
+  if(fidx.length)g.userData.finRefineW=.45;g.computeBoundingSphere();return g}};return G}
+// smooth body normals across the loft seam (j=0 / j=NV duplicate the dorsal line): average normals of coincident body vertices so there is no crease
+function weldBodyN(g,fa){const p=g.attributes.position.array,n=g.attributes.normal.array,m=new Map(),q=v=>Math.round(v*1e6);
+ for(let i=0;i<p.length/3;i++){if(fa&&fa[i])continue;const k=q(p[i*3])+','+q(p[i*3+1])+','+q(p[i*3+2]);let a=m.get(k);if(!a)m.set(k,a=[]);a.push(i)}
+ for(const a of m.values()){if(a.length<2)continue;let x=0,y=0,z=0;for(const i of a){x+=n[i*3];y+=n[i*3+1];z+=n[i*3+2]}const l=Math.hypot(x,y,z)||1;for(const i of a){n[i*3]=x/l;n[i*3+1]=y/l;n[i*3+2]=z/l}}
+ g.attributes.normal.needsUpdate=true;return g}
 // ---------- skin: colour (painted in 256x128 space, upscaled) + procedural scale detail baked into colour & normal map ----------
 function hsh(i,j,s){let h=(Math.imul(i|0,374761393)+Math.imul(j|0,668265263)+Math.imul(s|0,2147483629))|0;h=Math.imul(h^(h>>>13),1274126177);h^=h>>>16;return (h>>>0)/4294967296}
 function vn(x,y,s){const i=Math.floor(x),j=Math.floor(y),fx=x-i,fy=y-j,u=fx*fx*(3-2*fx),v=fy*fy*(3-2*fy),a=hsh(i,j,s),b=hsh(i+1,j,s),c=hsh(i,j+1,s),d=hsh(i+1,j+1,s);return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v}
@@ -1953,20 +2020,23 @@ function skinH0(sk,u,v){const t=sk.type;
    const dx=U-cx-(t==='scales'?.12:0),dy=(V-cy)*1.05,hh=1-Math.sqrt(dx*dx+dy*dy)/(t==='papillae'?.45:.8);if(hh>b1){b2=b1;b1=hh}else if(hh>b2)b2=hh}}
   if(t==='plates')return sst(0,.14,b1-b2)*.8+vn(u*sk.nx*4,v*sk.ny*4,3)*.2;if(t==='papillae')return Math.max(0,b1)*.8+vn(u*90,v*45,4)*.2;
   return Math.pow(Math.max(0,b1),.55)*.75+sst(0,.12,b1-b2)*.25}
+ if(t==='flat')return .5;
  if(t==='denticle')return vn(u*sk.nx,v*sk.ny,5)*.6+vn(u*sk.nx*2.7,v*sk.ny*2.7,6)*.4;
  return vn(u*sk.nx,v*sk.ny,9)*.5+(Math.sin((v*sk.ny*.8+vn(u*8,v*3,2)*1.5)*2*PI)*.5+.5)*.5}  // 'smooth' wrinkly skin
-const MICRO=[0,.06,.09][q]+(UL?.03:0);
+const MICRO=0;  // smoothing pass: no micro-noise on body skin (real fish/sharks read smooth at game distance)
+// per skin type: normal-map strength factor and colour-baked relief factor (keep only a faint, fine scale shimmer)
+const SMOOTH={flat:[0,0],scales:[.06,.1],denticle:[.06,.15],smooth:[.04,.12],papillae:[.05,.1],plates:[.4,.4]};
 let SK={type:'scales',nx:40,ny:14,str:2,shade:.18};
 function tex(paint,finTop,finBase,skin,post){skin=skin||SK;const c=document.createElement('canvas');c.width=TW;c.height=TH;const x=c.getContext('2d'),k=TW/256;x.save();x.scale(k,k);paint(x,256,128);
- const fg=x.createLinearGradient(0,0,0,11);fg.addColorStop(0,finTop);fg.addColorStop(1,finBase);x.fillStyle=fg;x.fillRect(0,0,256,11);if(post)post(x);x.restore();
+ const fg=x.createLinearGradient(0,0,0,11);fg.addColorStop(0,finTop);fg.addColorStop(1,finBase);x.fillStyle=fg;x.fillRect(0,0,256,11);if(post)post(x);x.fillStyle='#f6f4ea';x.fillRect(250,0,6,1.5);x.restore();
  const H=new Float32Array(TW*TH),fin=Math.ceil(11.5*k);for(let y=fin;y<TH;y++){const v=1-y/TH;for(let xx=0;xx<TW;xx++)H[y*TW+xx]=skinH(skin,xx/TW,v)}
- const im=x.getImageData(0,0,TW,TH),d=im.data,sh=skin.shade!=null?skin.shade:.18;for(let i=fin*TW;i<TW*TH;i++){const m=1-sh+sh*1.4*H[i];d[i*4]=Math.min(255,d[i*4]*m);d[i*4+1]=Math.min(255,d[i*4+1]*m);d[i*4+2]=Math.min(255,d[i*4+2]*m)}
+ const SMK=SMOOTH[skin.type]||[.2,.25],im=x.getImageData(0,0,TW,TH),d=im.data,sh=(skin.shade!=null?skin.shade:.18)*SMK[1];for(let i=fin*TW;i<TW*TH;i++){const m=1-sh+sh*1.4*H[i];d[i*4]=Math.min(255,d[i*4]*m);d[i*4+1]=Math.min(255,d[i*4+1]*m);d[i*4+2]=Math.min(255,d[i*4+2]*m)}
  x.putImageData(im,0,0);x.fillStyle='#050505';x.fillRect(0,TH-6*k,6*k,6*k);
- const nc=document.createElement('canvas');nc.width=TW;nc.height=TH;const nx=nc.getContext('2d'),ni=nx.createImageData(TW,TH),nd=ni.data,S=(skin.str||2)*(TW/512);
+ const nc=document.createElement('canvas');nc.width=TW;nc.height=TH;const nx=nc.getContext('2d'),ni=nx.createImageData(TW,TH),nd=ni.data,S=(skin.str||2)*(TW/512)*SMK[0];let ampS=0,ampN=0;
  for(let y=0;y<TH;y++){const ym=Math.max(0,y-1)*TW,y0=y*TW,yp=Math.min(TH-1,y+1)*TW;for(let xx=0;xx<TW;xx++){const xm=(xx-1+TW)%TW,xp=(xx+1)%TW;
   const gx=(H[ym+xp]+2*H[y0+xp]+H[yp+xp])-(H[ym+xm]+2*H[y0+xm]+H[yp+xm]),gy=(H[yp+xm]+2*H[yp+xx]+H[yp+xp])-(H[ym+xm]+2*H[ym+xx]+H[ym+xp]);
-  const a=-gx*S,b=gy*S,l=Math.hypot(a,b,1),o=(y0+xx)*4;nd[o]=(a/l*.5+.5)*255;nd[o+1]=(b/l*.5+.5)*255;nd[o+2]=(1/l*.5+.5)*255;nd[o+3]=255}}nx.putImageData(ni,0,0);
- const map=new T.CanvasTexture(c);map.colorSpace=T.SRGBColorSpace;map.anisotropy=4;const nm=new T.CanvasTexture(nc);nm.colorSpace=T.NoColorSpace||'';return{map,normalMap:nm}}
+  const a=-gx*S,b=gy*S,l=Math.hypot(a,b,1),o=(y0+xx)*4;if(y>=fin){ampS+=Math.acos(1/l);ampN++}nd[o]=(a/l*.5+.5)*255;nd[o+1]=(b/l*.5+.5)*255;nd[o+2]=(1/l*.5+.5)*255;nd[o+3]=255}}nx.putImageData(ni,0,0);
+ const map=new T.CanvasTexture(c);map.colorSpace=T.SRGBColorSpace;map.anisotropy=4;const nm=new T.CanvasTexture(nc);nm.colorSpace=T.NoColorSpace||'';nm.userData={tiltDeg:ampN?ampS/ampN*180/PI:0};return{map,normalMap:nm}}
 const counter=(x,w,h,top,mid,bel,split)=>{const g=x.createLinearGradient(0,10,0,h-10);g.addColorStop(0,top);g.addColorStop(split||.5,mid);g.addColorStop(Math.min(1,(split||.5)+.12),bel);g.addColorStop(1,bel);x.fillStyle=g;x.fillRect(0,0,w,h)};
 let rs=4242;const rnd=()=>{rs=(rs*16807)%2147483647;return (rs-1)/2147483646};
 const speck=(x,w,h,n,col,r0,r1,y0,y1)=>{x.fillStyle=col;for(let i=0;i<n;i++){x.beginPath();x.arc(rnd()*w,(y0||0)+rnd()*((y1||h)-(y0||0)),r0+rnd()*(r1-r0),0,6.3);x.fill()}};
@@ -1983,92 +2053,248 @@ function blender(TG,base){const cur=Object.assign({},base,TG.cruise);let last='c
   return{cur,ev,state}}}
 const pulse=(p,w)=>{p=p-Math.floor(p);return p<w?Math.sin(p/w*PI):0};
 // ---------- fish bend shader (wave, curl, jaw, gills, fins, roll, bob) + bent normals ----------
-function bendMat(tx,P,inst,fin,U){const m=new T.MeshLambertMaterial({map:tx.map,normalMap:tx.normalMap,side:T.DoubleSide});
+// wet-skin shading for every creature material (all tiers, a few ALU): soft Blinn highlight, subtle fresnel rim, gentle belly bounce (countershading)
+// uWet = (specular, shininess, rim, belly). Chains any existing onBeforeCompile; keeps the Lambert type so ultra/x360/extreme upgrades still apply.
+const WET={shark:[.16,22,.16,.14],barracuda:[.34,42,.2,.12],grouper:[.12,16,.12,.12],eel:[.22,30,.16,.1],turtle:[.12,18,.12,.1],turtleSkin:[.1,14,.1,.12],octopus:[.2,20,.14,.12],
+ clown:[.22,32,.14,.1],tang:[.28,34,.14,.12],chromis:[.3,40,.18,.12],damsel:[.24,34,.16,.1],sardine:[.4,48,.22,.14],wrasse:[.24,34,.16,.12],shrimp:[.3,40,.14,.08]};
+function wetSkin(m,w){w=w||[.2,28,.14,.1];if(m.userData.wet)return m;const uW={value:new T.Vector4(w[0],w[1],w[2],w[3])};m.userData.wet=uW;const prev=m.onBeforeCompile,pk=m.customProgramCacheKey;
+ m.onBeforeCompile=function(sh,r){if(prev)prev.call(this,sh,r);sh.uniforms.uWet=uW;sh.fragmentShader=sh.fragmentShader.replace('void main() {','uniform vec4 uWet;\nvoid main() {').replace('#include <opaque_fragment>',`{vec3 wN=normalize(normal);vec3 wV=normalize(vViewPosition);vec3 wL=normalize(vec3(.25,.9,.35));vec3 wC=vec3(.9);
+#if NUM_DIR_LIGHTS > 0
+ wL=directionalLights[0].direction;wC=directionalLights[0].color;
+#endif
+ float wNV=clamp(abs(dot(wN,wV)),0.,1.);vec3 wH=normalize(wL+wV);float wF=.6+.4*pow(1.-wNV,3.);
+ outgoingLight+=wC*uWet.x*wF*pow(max(dot(wN,wH),0.),uWet.y)*max(0.,sign(dot(wN,wL)+.05));
+ outgoingLight+=diffuseColor.rgb*uWet.z*pow(1.-wNV,3.);
+ vec3 wNw=inverseTransformDirection(wN,viewMatrix);outgoingLight+=diffuseColor.rgb*uWet.w*max(0.,-wNw.y);}
+#include <opaque_fragment>`)};
+ m.customProgramCacheKey=function(){return (pk?pk.call(this):'')+'|wet1'};m.needsUpdate=true;return m}
+function bendMat(tx,P,inst,fin,U){const m=new T.MeshLambertMaterial({map:tx.map,normalMap:tx.normalMap,side:fin?T.FrontSide:T.DoubleSide}),FX=(P.finFx||[.12,.16,.72,1]).map(v=>(+v).toFixed(3));
  if(fin){m.transparent=true;m.opacity=fin;m.emissive=new T.Color(0x223333);m.emissiveMap=tx.map}
  U=U||{uPh:{value:0},uAmp:{value:P.amp},uK:{value:P.k},uTurn:{value:0},uX0:{value:P.x0},uLen:{value:P.L},uBase:{value:P.base||0},uCurl:{value:0},uLunge:{value:0},uJaw:{value:0},
-  uGill:{value:0},uGillPh:{value:0},uScull:{value:0},uScullPh:{value:0},uFlare:{value:0},uFin:{value:0},uRoll:{value:0},uBob:{value:0},uSwell:{value:0}};m.userData.U=U;
- m.onBeforeCompile=sh=>{Object.assign(sh.uniforms,U);sh.vertexShader='uniform float uPh,uAmp,uK,uTurn,uX0,uLen,uBase,uCurl,uLunge,uJaw,uGill,uGillPh,uScull,uScullPh,uFlare,uFin,uRoll,uBob,uSwell;\nattribute float aFin,aFinD;\n'+(inst?'attribute float aPhase;\n':'')+sh.vertexShader
- .replace('#include <beginnormal_vertex>',`float s_=clamp((uX0-position.x)/uLen,0.,1.);float ph_=uPh-s_*uK${inst?'+aPhase':''};float e_=uBase+(1.-uBase)*s_*s_;float sn_=sin(ph_),cs_=cos(ph_);
- float dds_=uLen*(uAmp*(2.*(1.-uBase)*s_*sn_-e_*uK*cs_)+uTurn*.6*s_+uCurl*(s_-.45));float g_=-dds_/uLen;float cr_=cos(uRoll),sr_=sin(uRoll);
+  uGill:{value:0},uGillPh:{value:0},uScull:{value:0},uScullPh:{value:0},uFlare:{value:0},uFin:{value:0},uRoll:{value:0},uBob:{value:0},uSwell:{value:0},uEnvP:{value:P.envP||2},uScAs:{value:0}};m.userData.U=U;
+ m.onBeforeCompile=sh=>{Object.assign(sh.uniforms,U);sh.vertexShader='uniform float uPh,uAmp,uK,uTurn,uX0,uLen,uBase,uCurl,uLunge,uJaw,uGill,uGillPh,uScull,uScullPh,uFlare,uFin,uRoll,uBob,uSwell,uEnvP,uScAs;\nattribute float aFin,aFinD,aFinT,aRay;\nvarying float vFn_,vFt_,vRy_;\n'+(inst?'attribute float aPhase;\n':'')+sh.vertexShader
+ .replace('#include <beginnormal_vertex>',`vFn_=aFin;vFt_=aFinT;vRy_=aRay;float s_=clamp((uX0-position.x)/uLen,0.,1.);float ph_=uPh-s_*uK${inst?'+aPhase':''};float pw_=pow(max(s_,1e-3),uEnvP-1.);float e_=uBase+(1.-uBase)*pw_*s_;float sn_=sin(ph_),cs_=cos(ph_);
+ float dds_=uLen*(uAmp*((1.-uBase)*uEnvP*pw_*sn_-e_*uK*cs_)+uTurn*.6*s_+uCurl*(s_-.45));float g_=-dds_/uLen;float cr_=cos(uRoll),sr_=sin(uRoll);
  vec3 objectNormal=normalize(vec3(normal.x-g_*normal.z,normal.y,normal.z));objectNormal=vec3(objectNormal.x,cr_*objectNormal.y-sr_*objectNormal.z,sr_*objectNormal.y+cr_*objectNormal.z);`)
  .replace('#include <begin_vertex>',`vec3 transformed=vec3(position);float hd_=1.-smoothstep(0.,.3,s_);
  if(aFin<.5){float gw_=smoothstep(.1,.17,s_)*(1.-smoothstep(.2,.28,s_));float bw_=max(0.,1.-abs(s_-.38)*3.);transformed.z*=1.+uGill*gw_*(.5+.5*sin(uGillPh))*.3+uSwell*bw_;transformed.y*=1.+uSwell*.5*bw_;
   float jw_=1.-smoothstep(0.,.12,s_);float hx_=uX0-uLen*.12;if(position.y<0.){float a_=-uJaw*.75*jw_;vec2 r_=vec2(transformed.x-hx_,transformed.y);transformed.x=hx_+r_.x*cos(a_)-r_.y*sin(a_);transformed.y=r_.x*sin(a_)+r_.y*cos(a_);}
   else transformed.y+=uJaw*jw_*uLen*.012;}
- else if(aFin<1.5){float sd_=position.z>0.?1.:-1.;transformed.y+=aFinD*uLen*(.06*uScull*sin(uScullPh+sd_*1.57)+.05*uFlare);transformed.z+=sd_*aFinD*uLen*.09*uFlare;transformed.x+=aFinD*uLen*.08*uFlare;}
+ else if(aFin<1.5){float sd_=position.z>0.?1.:-1.;float sp_=uScullPh+sd_*1.5708*uScAs;transformed.y+=aFinD*uLen*(.06*uScull*sin(sp_)+.05*uFlare);transformed.x+=aFinD*uLen*.035*uScull*cos(sp_);transformed.z+=sd_*aFinD*uLen*.09*uFlare;transformed.x+=aFinD*uLen*.08*uFlare;}
  else if(aFin<2.5){transformed.y+=sign(position.y)*aFinD*uLen*.045*uFin;}
  else{transformed.y+=position.y*.25*uFin*aFinD;}
  transformed.x+=uLunge*uLen*.14*hd_;transformed.z+=uLen*(uAmp*e_*sn_+uTurn*.3*s_*s_+uCurl*.5*((s_-.45)*(s_-.45)-.2025));transformed.x-=uLen*uAmp*e_*.15*abs(sn_);
- transformed=vec3(transformed.x,cr_*transformed.y-sr_*transformed.z,sr_*transformed.y+cr_*transformed.z);transformed.y+=uBob;`)};
- m.customProgramCacheKey=()=>'reefBend3'+(inst?'I':'')+(fin?'F':'');return m}
+ transformed=vec3(transformed.x,cr_*transformed.y-sr_*transformed.z,sr_*transformed.y+cr_*transformed.z);transformed.y+=uBob;`);
+  // fin look: subtle ray shading (bony fish), lighter + more translucent thin margin, opaque thick root; gated on the fin flag so the body is untouched
+  sh.fragmentShader='varying float vFn_,vFt_,vRy_;\n'+sh.fragmentShader.replace('#include <map_fragment>',`#include <map_fragment>
+  if(vFn_>.5){float t_=smoothstep(0.,.55,vFt_);float rd_=abs(fract(vRy_+.5)-.5);diffuseColor.rgb*=1.-${FX[0]}*(vRy_>0.?1.-smoothstep(0.,.18,rd_):0.)*t_;
+   diffuseColor.rgb=mix(diffuseColor.rgb*(1.+${FX[1]}),diffuseColor.rgb,t_);diffuseColor.a*=mix(${FX[2]},1.,smoothstep(0.,.35,vFt_));}`)};
+ m.customProgramCacheKey=()=>'reefBend6'+(inst?'I':'')+(fin?'F':'')+FX.join('_');return wetSkin(m,P.wet)}
 function tris(o){let n=0;o.traverse(m=>{if(m.isMesh){const g=m.geometry;n+=(g.index?g.index.count:g.attributes.position.count)/3}});return n}
 const FISH_BASE={amp:1,fm:1,curl:0,lunge:0,jaw:0,gill:.25,scull:0,flare:0,fin:0,roll:0,bob:0,mouth:.1,bite:0,eat:0,turnK:0};
 const FISH_TG={cruise:{scull:.15},glide:{amp:.1,fm:.35,scull:.05,fin:.15,gill:.2,mouth:.05},burst:{amp:1.55,fm:2.6,flare:-.6,fin:-.3,gill:.5},hover:{amp:.2,fm:.45,scull:1,bob:.6,gill:.45,mouth:.25,fin:.2},
  turn:{amp:.8,fm:1.25,curl:.75,turnK:1,flare:.3,fin:.3},brake:{amp:.12,fm:.6,flare:1,fin:1,lunge:-.25,gill:.4,scull:.6},bite:{amp:.45,fm:.9,bite:1,fin:.4,gill:.4},
  startle:{amp:1.4,fm:2.3,fin:1,flare:.6,gill:.9,mouth:.2},stunned:{amp:.18,fm:.25,roll:.5,bob:.5,jaw:.35,fin:-.4,flare:-.2,gill:.15,mouth:0,curl:.15},
  eat:{amp:.3,fm:.6,eat:1,gill:.9,fin:.1,scull:.4},idle:{amp:.12,fm:.4,gill:1,mouth:.6,bob:.35,scull:.45,fin:.1}};
+// ---------- reference-measured body specs (fractions of total length TL; u: 0 = snout tip -> 1 = tail tip, y up, z lateral) ----------
+// Measured from the photos in reference/<species>/ plus FishBase proportions (see reference/SOURCES.md). top/bot = half-depths above/below
+// the body axis, wid = half-width, lb = caudal-fin base, fins = polygons fanned from p[0], tip = distal vertex indices, ty = fin type override.
+const crv=pts=>u=>{const n=pts.length;if(u<=pts[0][0])return pts[0][1];if(u>=pts[n-1][0])return pts[n-1][1];let i=0;while(u>pts[i+1][0])i++;const p0=pts[Math.max(0,i-1)],p1=pts[i],p2=pts[i+1],p3=pts[Math.min(n-1,i+2)],h=p2[0]-p1[0],t=(u-p1[0])/h;
+ const m1=(p2[1]-p0[1])/(p2[0]-p0[0])*h,m2=(p3[1]-p1[1])/(p3[0]-p1[0])*h,t2=t*t,t3=t2*t;return(2*t3-3*t2+1)*p1[1]+(t3-2*t2+t)*m1+(-2*t3+3*t2)*p2[1]+(t3-t2)*m2};
+// grouper dorsal: spiny part (n spines, membrane notched between the tips) running into a taller, rounded soft-rayed part
+const GRD=n=>{const p=[[.5,.125],[.27,.13]],tip=[];for(let k=0;k<n;k++){const u=.295+k*(.205/(n-1));if(k){const um=u-.1025/(n-1);p.push([um,.165+.006*k/n])}tip.push(p.length);p.push([u,.205+.01*k/n])}
+ for(const t of[[.535,.195],[.575,.206],[.62,.21],[.665,.204],[.7,.182],[.718,.146]]){tip.push(p.length);p.push(t)}p.push([.722,.105],[.71,.09]);return{ty:2,u0:.5,tip,p,rays:n+6}};
+const GRC=big=>big?{ty:3,u0:.02,tip:[3,4,5,6,7,8,9],p:[[.805,0],[.8,.055],[.86,.1],[.93,.122],[.985,.1],[1,.055],[1.002,0],[1,-.055],[.985,-.1],[.93,-.122],[.86,-.1],[.8,-.055]]}:{ty:3,u0:.02,tip:[3,4,5,6,7,8],p:[[.805,0],[.8,.055],[.86,.1],[.93,.12],[.98,.1],[1,.04],[1,-.04],[.98,-.1],[.93,-.12],[.86,-.1],[.8,-.055]]};
+const SPEC={
+ // Caribbean reef / grey reef shark (Carcharhinus perezi / amblyrhynchos): depressed rounded snout, max depth ~.17TL at the 1st dorsal, heterocercal tail (upper lobe ~.27TL)
+ shark:{lb:.72,top:[[0,0],[.015,.012],[.04,.03],[.08,.047],[.14,.064],[.22,.08],[.3,.088],[.38,.085],[.47,.07],[.56,.05],[.64,.036],[.72,.027]],
+  bot:[[0,0],[.015,.008],[.04,.019],[.08,.032],[.14,.05],[.22,.07],[.3,.081],[.38,.078],[.47,.062],[.56,.043],[.64,.03],[.72,.022]],
+  wid:[[0,0],[.015,.016],[.04,.036],[.08,.055],[.14,.068],[.22,.075],[.3,.075],[.4,.065],[.5,.051],[.6,.036],[.72,.024]],eye:[.075,.02,.0085],
+  fins:[{ty:3,u0:.02,tip:[3,4,12],p:[[.725,0],[.72,.026],[.86,.11],[.995,.175],[1,.162],[.96,.118],[.95,.1],[.89,.035],[.875,0],[.88,-.04],[.862,-.112],[.84,-.108],[.76,-.04],[.72,-.02]]},
+   {ty:2,u0:.5,tip:[3,4,7],p:[[.33,.084],[.285,.087],[.32,.14],[.35,.185],[.362,.185],[.365,.15],[.375,.112],[.4,.093],[.39,.085]]},
+   {ty:2,u0:.3,tip:[2,3,5],p:[[.63,.037],[.6,.041],[.625,.068],[.64,.067],[.645,.05],[.67,.035]]},
+   {ty:2,u0:.28,tip:[2,3,5],p:[[.63,-.029],[.6,-.032],[.625,-.06],[.64,-.059],[.645,-.042],[.67,-.029]]},
+   {pair:1,u0:.62,tip:[3,4],p:[[.215,-.05,.05],[.19,-.045,.055],[.27,-.085,.14],[.33,-.115,.2],[.335,-.108,.19],[.3,-.085,.12],[.26,-.06,.06]]},
+   {pair:1,u0:.4,tip:[2,3],p:[[.53,-.05,.03],[.51,-.048,.03],[.555,-.072,.065],[.575,-.068,.062],[.565,-.05,.028]]}]},
+ // great barracuda (Sphyraena barracuda): long pointed head (~.28TL) with projecting lower jaw, depth ~.12TL, widely separated dorsals, forked caudal
+ barracuda:{lb:.84,top:[[0,0],[.03,.009],[.08,.021],[.15,.035],[.25,.049],[.36,.057],[.5,.057],[.62,.049],[.74,.035],[.84,.022]],
+  bot:[[0,.004],[.03,.011],[.08,.018],[.15,.03],[.25,.044],[.36,.053],[.5,.052],[.62,.042],[.74,.029],[.84,.02]],
+  wid:[[0,0],[.03,.007],[.1,.02],[.25,.032],[.45,.036],[.65,.028],[.84,.013]],eye:[.115,.017,.011],
+  fins:[{ty:3,u0:.02,tip:[3,4,8,9],p:[[.845,0],[.84,.02],[.93,.075],[1,.12],[.99,.1],[.955,.045],[.94,0],[.955,-.045],[.99,-.1],[1,-.12],[.93,-.075],[.84,-.02]]},
+   {ty:2,u0:.55,tip:[2,3],p:[[.38,.055],[.355,.057],[.37,.1],[.385,.105],[.4,.085],[.43,.057]]},
+   {ty:2,u0:.35,tip:[2,3],p:[[.69,.041],[.665,.045],[.675,.09],[.69,.088],[.7,.06],[.73,.039]]},
+   {ty:2,u0:.33,tip:[2,3],p:[[.7,-.035],[.675,-.039],[.685,-.08],[.7,-.078],[.71,-.052],[.74,-.032]]},
+   {pair:1,u0:.65,tip:[2,3],p:[[.27,-.022,.03],[.255,-.018,.032],[.32,-.04,.065],[.335,-.035,.055],[.3,-.028,.035]]},
+   {pair:1,u0:.45,tip:[2,3],p:[[.4,-.05,.02],[.385,-.05,.02],[.43,-.07,.045],[.445,-.062,.035]]}]},
+ // brown-marbled grouper (Epinephelus fuscoguttatus): robust, depth ~.29TL, big head (~.32TL) with straight sloping profile, long continuous dorsal, rounded fins
+ grouper:{lb:.8,top:[[0,0],[.016,.027],[.05,.052],[.12,.084],[.2,.112],[.28,.128],[.38,.145],[.5,.137],[.6,.11],[.7,.077],[.8,.058]],
+  bot:[[0,.008],[.016,.026],[.05,.048],[.12,.078],[.2,.108],[.3,.13],[.4,.14],[.5,.126],[.6,.095],[.7,.067],[.8,.055]],
+  wid:[[0,0],[.02,.02],[.08,.055],[.18,.085],[.32,.1],[.48,.09],[.62,.065],[.8,.032]],eye:[.1,.052,.021],
+  uw:.07,fins:[GRC(q>1&&!UL),GRD(q<2||UL?5:6),
+   {ty:2,u0:.3,tip:[2,3,4],p:[[.62,-.1],[.56,-.12],[.58,-.17],[.62,-.2],[.665,-.195],[.7,-.15],[.715,-.09],[.7,-.075]]},
+   {pair:1,u0:.62,uw:.035,tip:[3,4,5],p:[[.31,-.03,.1],[.29,0,.1],[.35,.04,.13],[.43,.035,.15],[.48,-.02,.155],[.45,-.08,.14],[.34,-.075,.1]]},
+   {pair:1,u0:.42,uw:.03,tip:[2,3],p:[[.34,-.125,.04],[.32,-.12,.04],[.39,-.2,.07],[.43,-.19,.06],[.38,-.13,.04]]}]},
+ // green moray (Gymnothorax funebris): depth ~1/14 TL, raised nape behind the head, laterally compressed tail, dorsal fin from just behind the head, anal from mid-body
+ eel:{lb:1,rw:.12,top:[[0,0],[.012,.011],[.035,.021],[.07,.031],[.11,.038],[.16,.039],[.3,.037],[.55,.036],[.75,.034],[.88,.029],[.96,.019],[1,.003]],
+  bot:[[0,.004],[.012,.01],[.035,.016],[.07,.022],[.11,.027],[.16,.03],[.3,.032],[.55,.033],[.75,.031],[.88,.026],[.96,.016],[1,.003]],
+  wid:[[0,0],[.012,.009],[.05,.019],[.12,.025],[.3,.025],[.5,.021],[.7,.015],[.85,.009],[.95,.005],[1,.002]],eye:[.042,.013,.0075],fins:[],
+  // anterior nostril tubes at the snout tip (high/ultra only, to keep the phone tiers smooth + light)
+  extra:(g,x0,L)=>{const M=specMap(SPEC.eel);for(const z of q>1?[1,-1]:[])g.cone([x0-L*.017,L*.0055,z*L*.0062],[.85,.45,z*.2],L*.0017,L*.0105,3,M.X(.03)/256,1-M.Y(.004)/128)}}};
+function specBody(g,S,L,NU,NV,noEye){const x0=L/2,T_=crv(S.top),B_=crv(S.bot),W_=crv(S.wid),M_=S.mid?crv(S.mid):()=>0,hm=Math.max(...S.top.map(p=>p[1]),...S.bot.map(p=>p[1])),Hm=L*hm;
+ g.RW=S.rw!=null?S.rw:.2;g.loft(x0,L*S.lb,NU,NV,s=>{const u=s*S.lb;return{t:L*Math.max(1e-4,T_(u)),b:L*Math.max(1e-4,B_(u)),w:L*Math.max(1e-4,W_(u)),y:L*M_(u)}},Hm);
+ const m=(p,z)=>[x0-L*p[0],L*p[1],L*(p[2]||0)*z];
+ // thick fins: root = outline points on the body surface (elliptic body distance), root thickness from the root chord (caudal: the peduncle width),
+ // root pushed into the body (no gap), fillet normals lean into the body normal, rays / ridges for bony fish
+ const FQ=g.FQ||{rows:2,sub:1},fk=S.finK||.12,uC=u=>clamp(u,0,S.lb);
+ const onBody=(u,y,z)=>{if(u>S.lb+.012||u<-.01)return false;const uu=uC(u),dy=y-M_(uu),hh=Math.max(1e-4,dy>0?T_(uu):B_(uu)),w=Math.max(1e-4,W_(uu));return Math.hypot(dy/hh,z/w)<1.15};
+ const bodyN=q=>{const u=uC((x0-q[0])/L),dy=q[1]/L-M_(u),hh=Math.max(2e-3,dy>0?T_(u):B_(u)),w=Math.max(2e-3,W_(u)),vy=dy/(hh*hh),vz=q[2]/L/(w*w),l=Math.hypot(vy,vz)||1;return[0,vy/l,vz/l]};
+ for(const f of S.fins){const tail=f.ty===3||(!f.pair&&f.p[0][0]>.8*S.lb),rp=f.p.filter((p,k)=>!k||onBody(p[0],p[1],p[2]||0));let rl=0;for(const a of rp)for(const b of rp)rl=Math.max(rl,Math.hypot(a[0]-b[0],a[1]-b[1],(a[2]||0)-(b[2]||0)));
+  const ym=Math.max(1e-3,...f.p.map(p=>p[1]))*L,H=(f.h||1)*(tail?(S.cH||1.6)*W_(S.lb)*L:clamp(fk*rl*L,.003*L,Math.min(1.6*W_(uC(f.p[0][0]))*L,.024*L))),
+   o={H,uw:f.uw||S.uw,v0:f.v0,rows:FQ.rows,sub:FQ.sub,closed:FQ.closed,mM:FQ.mM,flare:S.finF==null?.5:S.finF,rays:f.rays!=null?f.rays:(S.rays||0)*(tail?1.4:1),ridge:S.ridge||0,root:p=>onBody((x0-p[0])/L,p[1]/L,Math.abs(p[2])/L),
+    sink:tail?((p,h)=>[.7*h,0,0]):((p,h)=>{const u=uC((x0-p[0])/L),d=[0,L*M_(u)-p[1],-p[2]],l=Math.hypot(d[1],d[2])||1,dy=-d[1]/L,hh=Math.max(1e-4,dy>0?T_(u):B_(u)),rho=Math.hypot(dy/hh,p[2]/L/Math.max(1e-4,W_(u))),k=Math.min(.6,Math.max(Math.min(.45*h,.4*l)/l,1-.88/Math.max(rho,1e-3)));return[0,d[1]*k,d[2]*k]}),
+    bodyN:tail?null:bodyN,bias:tail&&S.hetero?((e,r)=>1+S.hetero*clamp(e[1]/ym,0,1)*Math.min(1,r*3)):null};
+  for(const z of f.pair?[1,-1]:[1])g.fin(f.p.map(p=>m(p,z)),f.u0,f.tip,f.ty,o)}
+ if(S.eye&&!noEye){const[eu,ey,er]=S.eye,tp=T_(eu),zs=W_(eu)*Math.sqrt(Math.max(.05,1-Math.pow(ey/tp,2)));for(const z of[1,-1])g.eye(x0-L*eu,L*(ey+M_(eu)),L*zs*z,L*er)}
+ if(S.extra)S.extra(g,x0,L,{T:T_,B:B_,W:W_,M:M_});
+ return{x0,Hm,hm,T:T_,B:B_,W:W_,M:M_}}
+// texture-space helpers for a spec (paint space 256x128): body u -> canvas x, body y (TL fraction) -> canvas y; fin band = rows 0..11, column u0*256
+function specMap(S){const hm=Math.max(...S.top.map(p=>p[1]),...S.bot.map(p=>p[1]));return{X:u=>(.02+.96*(1-u/S.lb))*256,Y:y=>(1-(.08+.82*clamp(.5+y/(2*hm),0,1)))*128,
+ sx:.96*256/S.lb,sy:.82*128/(2*hm),fin:(x,u0,root,tip,mid)=>{const g=x.createLinearGradient(0,0,0,11);g.addColorStop(0,tip);if(mid)g.addColorStop(.45,mid);g.addColorStop(1,root);x.fillStyle=g;x.fillRect(u0*256-4,0,8,11)}}}
+
 const D={
- shark:{skin:{type:'denticle',nx:300,ny:90,str:1,shade:.05},L:2.2,NU:26,NV:20,amp:.07,k:5.5,freq:1.6,base:.04,build(g,q){const L=2.2,x0=L/2,Hm=.24;
-   g.loft(x0,L*.86,...LOD(q,[26,20],[34,24],[42,27]),s=>{const r=s<.3?Math.pow(Math.sin(PI/2*s/.3),.7):Math.pow(1-(s-.3)/.7,1.25)*.98+.02;const nose=sst(0,.06,s);return{t:Hm*r*(.65+.35*nose),b:Hm*.85*r*(.6+.4*nose),w:.2*r,y:-.02*(1-nose)}},Hm);
-   const xt=x0-L*.86;// heterocercal tail
-   g.fin([[xt+.05,0],[xt-.02,.08],[xt-.38,.55],[xt-.46,.52],[xt-.2,.06],[xt-.25,-.26],[xt-.31,-.28],[xt-.06,-.06]].map(p=>[p[0],p[1],0]),.02,[2,3,5,6]);
-   g.fin([[x0-.82,.17],[x0-.6,.2],[x0-.95,.58],[x0-1.02,.55],[x0-1.05,.2]].map(p=>[p[0],p[1],0]),.55,[2,3]); // 1st dorsal
-   g.fin([[x0-1.5,.08],[x0-1.47,.1],[x0-1.6,.2],[x0-1.62,.09]].map(p=>[p[0],p[1],0]),.3,[2]);               // 2nd dorsal
-   g.fin([[x0-1.55,-.07],[x0-1.52,-.08],[x0-1.64,-.17],[x0-1.66,-.07]].map(p=>[p[0],p[1],0]),.28,[2]);        // anal
-   for(const z of[1,-1]){g.fin([[x0-.55,-.1,.13*z],[x0-.5,-.12,.15*z],[x0-.95,-.32,.55*z],[x0-1.0,-.3,.5*z],[x0-.8,-.14,.17*z]],.6,[2,3]);   // pectorals
-    g.fin([[x0-1.25,-.1,.07*z],[x0-1.22,-.11,.08*z],[x0-1.38,-.2,.2*z],[x0-1.4,-.13,.09*z]],.4,[2]);g.eye(x0-.2,.04,.115*z,.022)}},           // pelvics, eyes
-  tex:()=>tex((x,w,h)=>{counter(x,w,h,'#4f5b66','#7f8b94','#eef0ec',.55);x.fillStyle='rgba(30,35,40,.5)';for(let i=0;i<5;i++)x.fillRect(w*.74+i*5,h*.42,2,h*.18);
-    x.fillStyle='rgba(0,0,0,.3)';x.beginPath();x.ellipse(w*.985,h*.55,4,6,0,0,6.3);x.fill()},'#1a1c1f','#6c7780')},
- barracuda:{skin:{type:'scales',nx:170,ny:20,str:1.1,shade:.07},L:1.4,amp:.06,k:5,freq:2.2,base:.02,build(g,q){const L=1.4,x0=L/2,Hm=.09;
-   g.loft(x0,L*.88,...LOD(q,[24,14],[34,18],[46,23]),s=>{const r=s<.22?Math.pow(s/.22,.6):1-Math.pow((s-.22)/.78,1.6)*.93;return{t:Hm*r,b:Hm*r*(s<.08?.7:1),w:Hm*.8*r,y:s<.1?-.01:0}},Hm);
-   const xt=x0-L*.88;g.fin([[xt+.03,0],[xt-.02,.03],[xt-.2,.17],[xt-.17,.04],[xt-.12,0],[xt-.17,-.04],[xt-.2,-.17],[xt-.02,-.03]].map(p=>[p[0],p[1],0]),.03,[2,6]);
-   g.fin([[x0-.42,.08],[x0-.4,.08],[x0-.47,.17],[x0-.52,.08]].map(p=>[p[0],p[1],0]),.6,[2]);g.fin([[x0-.85,.065],[x0-.83,.065],[x0-.92,.14],[x0-.95,.06]].map(p=>[p[0],p[1],0]),.3,[2]);
-   g.fin([[x0-.86,-.06],[x0-.84,-.06],[x0-.93,-.13],[x0-.96,-.055]].map(p=>[p[0],p[1],0]),.3,[2]);
-   for(const z of[1,-1]){g.fin([[x0-.3,-.03,.06*z],[x0-.28,-.03,.065*z],[x0-.42,-.09,.15*z],[x0-.42,-.05,.07*z]],.7,[2]);g.eye(x0-.12,.025,.045*z,.016)}},
-  tex:()=>tex((x,w,h)=>{counter(x,w,h,'#3d4c56','#a9b6bc','#f2f5f4',.5);x.fillStyle='rgba(25,35,45,.55)';for(let i=0;i<20;i++)x.fillRect(w*.12+i*9.5,h*.18,4.5,h*.3);
-   speck(x,w,h,30,'rgba(15,20,25,.6)',1,2,h*.5,h*.65)},'#2a3238','#8a979e')},
- grouper:{skin:{type:'scales',nx:100,ny:22,str:1.8,shade:.1},L:1.3,amp:.05,k:4,freq:1.2,base:.03,build(g,q){const L=1.3,x0=L/2,Hm=.28;
-   g.loft(x0,L*.82,...LOD(q,[22,18],[30,22],[40,27]),s=>{const r=s<.32?Math.pow(Math.sin(PI/2*s/.32),.55):1-Math.pow((s-.32)/.68,1.5)*.82;return{t:Hm*r,b:Hm*r*1.05,w:.2*r,y:0}},Hm*1.05);
-   const xt=x0-L*.82;g.fin([[xt+.04,0],[xt,.07],[xt-.12,.2],[xt-.25,.17],[xt-.28,0],[xt-.25,-.17],[xt-.12,-.2],[xt,-.07]].map(p=>[p[0],p[1],0]),.05,[2,3,4,5,6]);
-   const dp=[[x0-.25,.25]];for(let i=0;i<=10;i++){const xx=x0-.25-i*.065;dp.push([xx,.27+.07*(i%2?.6:1)*(1-i/14)-(i>6?(i-6)*.005:0)])}dp.push([x0-.95,.13]);g.fin(dp.map(p=>[p[0],p[1],0]),.5,[2,4,6,8,10]);
-   g.fin([[x0-.8,-.18],[x0-.78,-.2],[x0-.9,-.32],[x0-.98,-.13]].map(p=>[p[0],p[1],0]),.2,[2]);
-   for(const z of[1,-1]){g.fin([[x0-.36,-.04,.17*z],[x0-.34,-.03,.18*z],[x0-.48,.02,.32*z],[x0-.6,-.1,.3*z],[x0-.46,-.12,.17*z]],.6,[2,3]);g.fin([[x0-.42,-.22,.07*z],[x0-.6,-.36,.12*z],[x0-.55,-.24,.06*z]],.5,[1]);
-    g.eye(x0-.17,.08,.13*z,.03)}},
-  tex:()=>tex((x,w,h)=>{counter(x,w,h,'#5a4632','#8b6e4c','#cdb795',.6);for(let i=0;i<6;i++){x.fillStyle='rgba(50,35,22,.35)';x.beginPath();x.ellipse(w*(.1+i*.15),h*.38,12,h*.3,.2,0,6.3);x.fill()}
-   speck(x,w,h,140,'rgba(40,28,18,.55)',2,4.5,10,h*.75);speck(x,w,h,40,'rgba(230,210,170,.3)',1.5,3,10,h*.7);x.fillStyle='rgba(40,25,15,.4)';x.fillRect(w*.94,h*.6,12,3)},'#4a3828','#8b6e4c')},
- eel:{skin:{type:'smooth',nx:120,ny:20,str:1.6,shade:.12},L:1.9,amp:.09,k:9,freq:1.4,base:.55,build(g,q){const L=1.9,x0=L/2,Hm=.075;
-   g.loft(x0,L,...LOD(q,[46,12],[64,14],[88,13]),s=>{const r=s<.06?Math.pow(s/.06,.5):s>.8?1-Math.pow((s-.8)/.2,1.3)*.97:1;return{t:Hm*r*(s<.12?1.15:1),b:Hm*r*(s<.06?.8:1),w:Hm*.75*r,y:0}},Hm);
-   // continuous dorsal+anal ribbon fin
-   const N=18;for(const sg of[1,-1]){const pts=[];const s0=sg>0?.12:.5;for(let i=0;i<=N;i++){const s=s0+(1-s0)*i/N,x=x0-L*s;pts.push([x,sg*Hm*(s>.8?1-Math.pow((s-.8)/.2,1.3)*.97:1)*.9])}
-    for(let i=N;i>=0;i--){const s=s0+(1-s0)*i/N,x=x0-L*s;pts.push([x,sg*(Hm*.9+.035*Math.sin(PI*Math.min(1,(s-s0)/(1-s0))+.2))])}
-    const b0=g.pos.length/3;pts.forEach((p,k)=>{g.pos.push(p[0],p[1],0);g.uv.push(.5,k>N?.995:.93);g.fa.push(2);g.fd.push(k>N?1:0)});for(let i=0;i<N;i++){const a=b0+i,b=b0+2*N+1-i;g.fidx.push(a,a+1,b,a+1,b-1,b)}}
-   for(const z of[1,-1])g.eye(x0-.06,.04,.055*z,.012)},
-  tex:()=>tex((x,w,h)=>{counter(x,w,h,'#2e4a24','#56702e','#a9b26a',.62);for(let i=0;i<180;i++){x.fillStyle=`rgba(${20+Math.random()*30|0},${40+Math.random()*30|0},15,.55)`;x.beginPath();x.ellipse(Math.random()*w,10+Math.random()*h*.7,3+Math.random()*7,2+Math.random()*4,Math.random()*3,0,6.3);x.fill()}
-   speck(x,w,h,60,'rgba(220,230,140,.35)',1,2,10,h*.8);x.fillStyle='rgba(0,0,0,.35)';x.fillRect(w*.965,h*.5,6,2)},'#3a5226','#5a7232')}};
-// prey variants: profile & paint
+ shark:{skin:{type:'denticle',nx:300,ny:90,str:1,shade:.05},L:2.2,build(g,q){specBody(g,SPEC.shark,2.2,...LOD(q,[24,20],[30,24],[38,27]))},
+  tex:()=>{const M=specMap(SPEC.shark);return tex((x,w,h)=>{counter(x,w,h,'#57636d','#7c8892','#eef0ec',.56);
+   x.fillStyle='rgba(236,238,236,.32)';x.beginPath();x.moveTo(M.X(.26),M.Y(-.028));x.quadraticCurveTo(M.X(.45),M.Y(-.006),M.X(.62),M.Y(-.03));x.lineTo(M.X(.62),M.Y(-.046));x.quadraticCurveTo(M.X(.45),M.Y(-.03),M.X(.26),M.Y(-.05));x.closePath();x.fill();
+   x.fillStyle='rgba(28,32,38,.55)';for(let i=0;i<5;i++){const xx=M.X(.165+i*.011);x.fillRect(xx-.7,M.Y(.03),1.4,M.Y(-.035)-M.Y(.03))}
+   x.fillStyle='rgba(20,22,26,.45)';x.beginPath();x.ellipse(M.X(.055),M.Y(-.02),M.sx*.03,1.6,0,0,6.3);x.fill()},
+   '#2a2f34','#66717a',null,x=>{M.fin(x,.02,'#5d6871','#1c2126','#454f58');M.fin(x,.62,'#6a757e','#2a3035');M.fin(x,.5,'#5d6871','#3a434b');M.fin(x,.3,'#5d6871','#3a434b');M.fin(x,.28,'#8a949c','#4a545c');M.fin(x,.4,'#7d8790','#5a646c')})}},
+ barracuda:{skin:{type:'scales',nx:170,ny:20,str:1.1,shade:.07},L:1.4,build(g,q){specBody(g,SPEC.barracuda,1.4,...LOD(q,[21,14],[30,18],[42,23]))},
+  tex:()=>{const M=specMap(SPEC.barracuda);return tex((x,w,h)=>{counter(x,w,h,'#3a4954','#a6b3ba','#f2f5f4',.47);
+   x.fillStyle='rgba(30,42,52,.42)';for(let i=0;i<19;i++){const u=.2+i*.031;x.beginPath();x.moveTo(M.X(u),M.Y(.05));x.lineTo(M.X(u+.012),M.Y(.05));x.lineTo(M.X(u+.022),M.Y(.012));x.lineTo(M.X(u+.01),M.Y(.012));x.fill()}
+   x.fillStyle='rgba(12,16,20,.85)';for(let i=0;i<14;i++){const u=.42+rnd()*.38,y=-.008-rnd()*.026;x.beginPath();x.ellipse(M.X(u),M.Y(y),2+rnd()*2.2,1.6+rnd()*1.4,0,0,6.3);x.fill()}
+   x.fillStyle='rgba(40,50,58,.6)';x.fillRect(M.X(.03),M.Y(0)-1,M.X(0)-M.X(.03),2)},
+   '#2a3238','#8a979e',null,x=>{M.fin(x,.02,'#4a5560','#f4f4f2','#1e252b');M.fin(x,.35,'#4a5560','#f0f0ee','#1e252b');M.fin(x,.33,'#4a5560','#f0f0ee','#1e252b');M.fin(x,.55,'#4a5560','#22282e');M.fin(x,.65,'#b8c3c8','#8d989f');M.fin(x,.45,'#c8d0d4','#a8b2b8')})}},
+ grouper:{skin:{type:'scales',nx:100,ny:22,str:1.8,shade:.1},L:1.3,build(g,q){specBody(g,SPEC.grouper,1.3,...LOD(q,[19,18],[25,22],[34,27]))},
+  tex:()=>{const M=specMap(SPEC.grouper);return tex((x,w,h)=>{counter(x,w,h,'#9c8462','#bea983','#e2d6ba',.64);
+   for(let i=0;i<70;i++){const u=rnd()*.82,y=-.12+rnd()*.27;x.fillStyle=`rgba(${60+rnd()*25|0},${40+rnd()*18|0},${24+rnd()*12|0},.55)`;x.beginPath();const cx=M.X(u),cy=M.Y(y),r=3+rnd()*6;for(let k=0;k<7;k++){const a=k/7*6.283,rr=r*(.6+rnd()*.6);x.lineTo(cx+Math.cos(a)*rr,cy+Math.sin(a)*rr*.8)}x.fill()}
+   speck(x,w,h,320,'rgba(55,38,24,.6)',.7,1.5,12,h-6);x.fillStyle='rgba(30,22,14,.75)';x.beginPath();x.ellipse(M.X(.77),M.Y(.05),5,3,0,0,6.3);x.fill()},
+   '#7a5c40','#b09468',null,x=>{for(const[u,r,m,t,n]of[[.02,'#6c4e34','#a88a62','#d9c79e',12],[.5,'#6a4c30','#a88a62','#dccaa0',16],[.3,'#6c4e34','#a88a62','#d6c49a',9],[.62,'#775a3c','#b49a72','#e0d0a8',12],[.42,'#6c4e34','#a88a62','#d6c49a',8]]){const cx=u*256;M.fin(x,u,r,t,m);
+    x.strokeStyle='rgba(58,38,22,.22)';x.lineWidth=.6;for(let k=0;k<9;k++){x.beginPath();x.moveTo(cx-8.5+k*2.1,10.5);x.lineTo(cx-8.5+k*2.1,2.5);x.stroke()}
+    x.fillStyle='rgba(230,216,178,.45)';for(let i=0;i<8;i++){x.beginPath();x.ellipse(cx-8+rnd()*16,1.5+rnd()*8.5,.5+rnd()*.9,.4+rnd()*.7,0,0,6.3);x.fill()}
+    x.fillStyle='rgba(44,28,16,.5)';for(let i=0;i<n*2;i++){x.beginPath();x.ellipse(cx-8.5+rnd()*17,1.5+rnd()*9,.4+rnd()*.8,.4+rnd()*.7,rnd()*3,0,6.3);x.fill()}}})}},
+ eel:{skin:{type:'flat',nx:40,ny:10,str:1,shade:0},L:1.9,build(g,q){const L=1.9,S=SPEC.eel,b=specBody(g,S,L,...LOD(q,[44,12],[61,14],[82,13])),x0=b.x0;
+   // continuous dorsal (from just behind the head) and anal (from mid-body) fin, joined around the tail tip
+   const N=LOD(q,[12],[18],[22])[0]+(UL?3:0);for(const sg of[1,-1]){const s0=sg>0?.11:.47,pr=sg>0?b.T:b.B,R=[],E=[],hs=[];for(let i=0;i<=N;i++){const u=s0+(1-s0)*i/N,r=(u-s0)/(1-s0);
+     R.push([x0-L*u,sg*L*pr(u)*.82,0]);E.push([x0-L*u,sg*L*(pr(u)*.82+.04*Math.pow(Math.sin(PI*(.1+.88*r)),.8)*(1-.35*r*r*r)),0]);hs.push(Math.max(.05,b.W(u)/.025))}
+    g.tfin(R,E,E.map(()=>1),E.map(()=>.995),E.map(()=>false),2,.5,{H:.9*.025*L,hs,rows:1,closed:UL,flare:.7,v0:.93,endT:t=>sg>0?Math.min(1,.25+t*N/2):1})}},
+  tex:()=>{const M=specMap(SPEC.eel);return tex((x,w,h)=>{counter(x,w,h,'#42602a','#4e6c30','#7a8e3c',.6);
+   // uniform green with a soft sheen: no blotches; head details only (gill opening, mouth line with pale lip)
+   x.fillStyle='rgba(12,20,6,.75)';x.beginPath();x.ellipse(M.X(.122),M.Y(-.007),M.sx*.0065,3.2,.25,0,6.3);x.fill();
+   x.strokeStyle='rgba(140,160,70,.35)';x.lineWidth=1;x.beginPath();x.ellipse(M.X(.122),M.Y(-.007),M.sx*.0085,4.3,.25,0,6.3);x.stroke();
+   x.fillStyle='rgba(20,30,10,.7)';x.fillRect(M.X(.052),M.Y(-.004)-.7,M.X(0)-M.X(.052),1.4);x.fillStyle='rgba(150,165,80,.3)';x.fillRect(M.X(.052),M.Y(-.004)+.9,M.X(.002)-M.X(.052),1)},
+   '#587426','#4e6c30',null,x=>M.fin(x,.5,'#3c5822','#8ea446','#5a7a2c'))}}};
+// prey variants + clownfish hero: reference-measured profiles (TL fractions), fins and paint
+const PF=(pe,pv)=>[{pair:1,u0:.6,tip:[2,3],p:pe},{pair:1,u0:.45,tip:[2],p:pv}];
 const PV={
- chromis:{h:.36,w:.17,tail:'fork',col:['#1d6f88','#3fb2c4','#bff3ee'],fin:['#2a8a9a','#5cc8d4']},
- damsel:{h:.42,w:.16,tail:'round',col:['#1a3fb8','#2f68e8','#9fc0ff'],fin:['#0c2a8a','#4b7cf0'],paint:x=>{x.fillStyle='rgba(120,220,255,.6)';for(let i=0;i<14;i++)x.fillRect(40+Math.random()*190,20+Math.random()*50,3,3)}},
- sardine:{h:.24,w:.14,tail:'fork',col:['#2b4e6a','#b9c9d2','#f4f7f8'],fin:['#7d8f9a','#b9c9d2'],paint:x=>{x.fillStyle='rgba(20,40,60,.6)';for(let i=0;i<5;i++){x.beginPath();x.arc(150+i*14,52,3,0,6.3);x.fill()}}},
- wrasse:{h:.26,w:.13,tail:'trunc',col:['#1f8a5a','#3fbf7a','#d8f0a0'],fin:['#d23a7a','#3fbf7a'],paint:x=>{x.strokeStyle='#e0408a';x.lineWidth=3;for(const y of[38,62]){x.beginPath();x.moveTo(30,y);x.bezierCurveTo(100,y-8,170,y+6,240,y-4);x.stroke()}}},
- tang:{h:.48,w:.12,tail:'trunc',col:['#ffd60a','#ffd60a','#fff0a0'],fin:['#f0c000','#ffe050'],paint:x=>{x.fillStyle='#fff';x.fillRect(22,56,4,8)}},
- clown:{h:.5,w:.24,tail:'round',big:1,col:['#f06a08','#ff7a12','#ff9a40'],fin:['#111111','#ff7a12'],skin:{type:'scales',nx:110,ny:20,str:.9,shade:.05},finPost:x=>{x.fillStyle='#ff7a12';x.fillRect(0,0,256,11);x.fillStyle='#111';x.fillRect(0,0,256,2.2)},paint:x=>{
-  const band=(cx,bw)=>{x.fillStyle='#111';x.beginPath();x.ellipse(cx,64,bw+3.5,72,0,0,6.3);x.fill();x.fillStyle='#fff';x.beginPath();x.ellipse(cx,64,bw,70,0,0,6.3);x.fill()};
-  band(256*.75,10);band(256*.5,12);band(256*.25,7);x.fillStyle='#111';x.fillRect(0,0,256*.06,128)}}};
-function buildPrey(g,v,L,qq){const P=PV[v],k=L/.22,x0=L/2,Hm=L*P.h*.5;
- g.loft(x0,L*.82,...(P.big?LOD(qq,[16,12],[18,13],[18,13]):LOD(qq,[12,10],[15,12],[18,13])),s=>{const r=s<.3?Math.pow(Math.sin(PI/2*s/.3),.6):1-Math.pow((s-.3)/.7,1.4)*.85;return{t:Hm*r,b:Hm*r*.92,w:L*P.w*.5*r,y:0}},Hm);
- const xt=x0-L*.82,th=Hm*1.15,o=a=>a*k;const tails={fork:[[xt+o(.006),0],[xt-o(.035),th],[xt-o(.02),0],[xt-o(.035),-th]],round:[[xt+o(.006),0],[xt-o(.012),th*.8],[xt-o(.04),th*.5],[xt-o(.045),0],[xt-o(.04),-th*.5],[xt-o(.012),-th*.8]],trunc:[[xt+o(.006),0],[xt-o(.035),th],[xt-o(.035),-th]]};
- g.fin(tails[P.tail].map(p=>[p[0],p[1],0]),.03,[1,2,3,4,5].filter(i=>i<tails[P.tail].length));
- if(P.big){const dp=[[x0-L*.22,Hm*.9]];for(let i=0;i<=6;i++)dp.push([x0-L*(.24+i*.075),Hm*(1.35+(i%2?.12:0)+(i>3?.15:0))]);dp.push([x0-L*.72,Hm*.55]);g.fin(dp.map(p=>[p[0],p[1],0]),.5,[1,2,3,4,5,6,7])}
- else g.fin([[x0-L*.25,Hm*.9],[x0-L*.3,Hm*1.6],[x0-L*.6,Hm*1.2],[x0-L*.7,Hm*.6]].map(p=>[p[0],p[1],0]),.5,[1,2]);
- g.fin([[x0-L*.5,-Hm*.85],[x0-L*.58,-Hm*1.3],[x0-L*.7,-Hm*.6]].map(p=>[p[0],p[1],0]),.4,[1]);
- for(const z of[1,-1]){g.fin([[x0-L*.28,-Hm*.2,L*P.w*.4*z],[x0-L*.42,-Hm*.45,L*P.w*1.3*z],[x0-L*.4,-Hm*.05,L*P.w*.5*z]],.6,[1]);if(P.big)g.fin([[x0-L*.4,-Hm*.8,L*P.w*.2*z],[x0-L*.5,-Hm*1.25,L*P.w*.45*z],[x0-L*.52,-Hm*.8,L*P.w*.15*z]],.5,[1])}}
-function preyTex(v){const P=PV[v];return tex((x,w,h)=>{counter(x,w,h,P.col[0],P.col[1],P.col[2],.55);P.paint&&P.paint(x);
- const ex=w*.86,ey=h*.42;x.fillStyle='#f4f0e0';x.beginPath();x.arc(ex,ey,P.big?8:6.5,0,6.3);x.fill();x.fillStyle='#0a0a0a';x.beginPath();x.arc(ex+1,ey,P.big?5.6:4.2,0,6.3);x.fill();x.fillStyle='rgba(255,255,255,.85)';x.beginPath();x.arc(ex+2.5,ey-2,1.4,0,6.3);x.fill()},
- P.fin[0],P.fin[1],P.skin||{type:'scales',nx:80,ny:15,str:1,shade:.06},P.finPost)}
+ chromis:{lb:.74,col:['#4f9fb4','#86d6cc','#d9f3e8'],fin:['#7cc8cc','#a6e2da'],iris:'#d8ece4',eye:[.085,.045,.03],
+  top:[[0,.008],[.03,.048],[.08,.105],[.15,.155],[.25,.19],[.35,.2],[.45,.18],[.55,.135],[.65,.085],[.74,.055]],
+  bot:[[0,.012],[.03,.04],[.08,.083],[.15,.123],[.25,.155],[.35,.165],[.45,.15],[.55,.11],[.65,.07],[.74,.05]],
+  wid:[[0,0],[.03,.02],[.1,.045],[.25,.06],[.4,.055],[.6,.035],[.74,.018]],
+  fins:[{ty:3,u0:.03,tip:[2,3,7,8],p:[[.745,0],[.74,.05],[.99,.22],[.96,.15],[.88,.05],[.865,0],[.88,-.05],[.96,-.15],[.99,-.22],[.74,-.05]]},
+   {ty:2,u0:.5,tip:[2,3,4,5],p:[[.48,.16],[.25,.19],[.3,.26],[.4,.27],[.5,.275],[.6,.24],[.68,.15],[.67,.09]]},
+   {ty:2,u0:.4,tip:[2,3],p:[[.57,-.1],[.5,-.14],[.54,-.23],[.62,-.24],[.68,-.15],[.68,-.075]]},
+   ...PF([[.25,-.02,.05],[.24,0,.05],[.36,-.02,.1],[.35,-.06,.09]],[[.28,-.14,.03],[.27,-.13,.03],[.37,-.22,.05]])],
+  finPost:(x,M)=>M.fin(x,.03,'#7cc8cc','#3d8a96','#9fdcd6')},
+ damsel:{lb:.78,col:['#1258d0','#2a84ff','#78b4ff'],split:.62,fin:['#3d8cf0','#2a6ee0'],iris:'#9fd0ff',eye:[.075,.045,.026],
+  top:[[0,.008],[.03,.04],[.08,.076],[.15,.11],[.25,.135],[.35,.145],[.45,.14],[.55,.115],[.65,.08],[.78,.055]],
+  bot:[[0,.012],[.03,.035],[.08,.065],[.15,.095],[.25,.115],[.35,.125],[.45,.12],[.55,.1],[.65,.07],[.78,.05]],
+  wid:[[0,0],[.03,.018],[.1,.042],[.25,.058],[.4,.055],[.6,.035],[.78,.018]],
+  fins:[{ty:3,u0:.03,tip:[2,3,7,8],p:[[.785,0],[.78,.05],[.9,.12],[.97,.135],[.95,.06],[.93,0],[.95,-.06],[.97,-.135],[.9,-.12],[.78,-.05]]},
+   {ty:2,u0:.5,tip:[2,3,4,5],p:[[.5,.13],[.24,.135],[.28,.2],[.4,.21],[.55,.215],[.66,.19],[.72,.12],[.71,.075]]},
+   {ty:2,u0:.4,tip:[2,3],p:[[.6,-.09],[.52,-.12],[.56,-.19],[.65,-.2],[.72,-.12],[.72,-.06]]},
+   ...PF([[.25,-.02,.05],[.24,0,.05],[.35,-.02,.09],[.34,-.055,.08]],[[.27,-.11,.03],[.26,-.1,.03],[.36,-.18,.045]])],
+  paint:(x,M)=>{x.fillStyle='rgba(10,20,60,.6)';x.fillRect(M.X(.075),M.Y(.048)-.8,M.X(0)-M.X(.075),1.6);x.fillStyle='rgba(5,10,30,.85)';x.beginPath();x.ellipse(M.X(.66),M.Y(.068),3,2.5,0,0,6.3);x.fill();
+   x.fillStyle='rgba(150,220,255,.35)';for(let i=0;i<30;i++)x.fillRect(M.X(.1+rnd()*.6),M.Y(-.08+rnd()*.18),1.5,1.5)},
+  finPost:(x,M)=>M.fin(x,.03,'#8fc0ff','#3a7ce8')},
+ sardine:{lb:.8,col:['#1a3550','#8fb0b8','#f4f6f4'],split:.42,fin:['#8e9ea7','#b7c5cc'],iris:'#e8e4d0',eye:[.082,.018,.025],
+  top:[[0,0],[.03,.016],[.08,.038],[.15,.06],[.25,.08],[.35,.088],[.45,.085],[.55,.075],[.65,.058],[.73,.042],[.8,.032]],
+  bot:[[0,.0005],[.03,.016],[.08,.034],[.15,.055],[.25,.075],[.35,.083],[.45,.08],[.55,.068],[.65,.05],[.73,.035],[.8,.028]],
+  wid:[[0,0],[.03,.013],[.1,.032],[.25,.045],[.4,.045],[.6,.032],[.8,.014]],
+  fins:[{ty:3,u0:.03,tip:[3,4,6,7],p:[[.805,0],[.8,.03],[.88,.08],[1,.135],[.95,.07],[.9,0],[.95,-.07],[1,-.135],[.88,-.08],[.8,-.03]]},
+   {ty:2,u0:.5,tip:[2,3],p:[[.42,.085],[.36,.088],[.38,.15],[.4,.16],[.47,.12],[.5,.088]]},
+   {ty:2,u0:.4,tip:[2,3],p:[[.71,-.035],[.65,-.05],[.66,-.075],[.76,-.055],[.77,-.035]]},
+   ...PF([[.23,-.05,.04],[.22,-.045,.042],[.3,-.075,.06],[.31,-.065,.05]],[[.46,-.075,.02],[.45,-.073,.02],[.52,-.095,.035]])],
+  paint:(x,M)=>{const gb=x.createLinearGradient(0,M.Y(.088),0,M.Y(-.04));gb.addColorStop(0,'#1a3550');gb.addColorStop(.42,'#3a6078');gb.addColorStop(.66,'#a3bec4');gb.addColorStop(1,'#f0f4f2');x.fillStyle=gb;x.fillRect(0,M.Y(.1),256,M.Y(-.04)-M.Y(.1));
+   const g=x.createLinearGradient(0,M.Y(.05),0,M.Y(.006));g.addColorStop(0,'rgba(170,205,140,0)');g.addColorStop(.55,'rgba(170,205,140,.38)');g.addColorStop(1,'rgba(235,240,215,0)');x.fillStyle=g;x.fillRect(0,M.Y(.05),256,M.Y(.006)-M.Y(.05));
+   x.fillStyle='rgba(14,28,42,.78)';for(const[y,u0,du,n]of[[.034,.24,.035,13],[.05,.27,.04,11]])for(let i=0;i<n;i++){x.beginPath();x.ellipse(M.X(u0+i*du+(rnd()-.5)*.012),M.Y(y+(rnd()-.5)*.006),1.5+rnd()*.8,1.4+rnd()*.7,0,0,6.3);x.fill()}
+   const gg=x.createRadialGradient(M.X(.14),M.Y(-.008),1,M.X(.14),M.Y(-.008),M.sx*.07);gg.addColorStop(0,'rgba(232,222,130,.42)');gg.addColorStop(1,'rgba(232,222,130,0)');x.fillStyle=gg;x.fillRect(M.X(.24),0,M.X(0)-M.X(.24),128);
+   x.strokeStyle='rgba(70,92,104,.4)';x.lineWidth=.9;x.beginPath();x.moveTo(M.X(.185),M.Y(.04));x.quadraticCurveTo(M.X(.2),M.Y(-.01),M.X(.17),M.Y(-.05));x.stroke()},
+  finPost:(x,M)=>{M.fin(x,.03,'#566470','#2c363f','#3e4a55');M.fin(x,.5,'#7e8e92','#d6de9e');M.fin(x,.4,'#a8b6ba','#e4eaea');M.fin(x,.6,'#a8b6ba','#dde3e3');M.fin(x,.45,'#a8b6ba','#dde3e3')}},
+ wrasse:{lb:.78,col:['#8c8c2a','#b4a436','#b890c0'],split:.62,fin:['#e04a9a','#3a8ad0'],iris:'#f0d040',eye:[.08,.03,.02],
+  top:[[0,.006],[.03,.022],[.08,.05],[.15,.08],[.25,.105],[.35,.115],[.45,.11],[.55,.095],[.65,.075],[.72,.058],[.78,.05]],
+  bot:[[0,0],[.03,.018],[.08,.04],[.15,.065],[.25,.09],[.35,.1],[.45,.095],[.55,.08],[.65,.06],[.72,.048],[.78,.044]],
+  wid:[[0,0],[.03,.015],[.1,.035],[.25,.048],[.45,.045],[.65,.03],[.78,.016]],
+  fins:[{ty:3,u0:.03,tip:[3,7],p:[[.785,0],[.78,.048],[.86,.1],[1,.17],[.92,.08],[.89,0],[.92,-.08],[1,-.17],[.86,-.1],[.78,-.048]]},
+   {ty:2,u0:.5,tip:[2,3],p:[[.5,.1],[.24,.105],[.26,.145],[.5,.15],[.72,.11],[.73,.06]]},
+   {ty:2,u0:.4,tip:[2,3],p:[[.62,-.07],[.5,-.095],[.52,-.135],[.72,-.1],[.73,-.05]]},
+   ...PF([[.25,-.01,.045],[.24,.01,.045],[.36,0,.11],[.38,-.04,.1]],[[.28,-.09,.02],[.27,-.085,.02],[.34,-.125,.035]])],
+  paint:(x,M)=>{x.strokeStyle='rgba(222,112,34,.62)';x.lineWidth=1.3;for(let u=.255;u<.735;u+=.0155){const o=(Math.round(u*64)%2)*.004;x.beginPath();x.moveTo(M.X(u+o),M.Y(.112));x.lineTo(M.X(u-.006+o),M.Y(-.02));x.lineTo(M.X(u+.002+o),M.Y(-.098));x.stroke()}
+   x.fillStyle='rgba(30,20,60,.9)';x.beginPath();x.ellipse(M.X(.742),M.Y(.016),4.2,13,0,0,6.3);x.fill();
+   x.save();x.beginPath();x.moveTo(256,0);x.lineTo(M.X(.215),0);x.quadraticCurveTo(M.X(.285),M.Y(0),M.X(.215),128);x.lineTo(256,128);x.clip();x.fillStyle='#3fa27c';x.fillRect(0,0,256,128);const cg=x.createLinearGradient(0,M.Y(-.025),0,M.Y(-.07));cg.addColorStop(0,'rgba(74,120,200,0)');cg.addColorStop(1,'rgba(74,120,200,.85)');x.fillStyle=cg;x.fillRect(0,0,256,128);
+   x.strokeStyle='#f0508c';x.lineWidth=2.5;const ex=M.X(.082),ey=M.Y(.032);for(const a of[-2.8,-2.3,-1.7,-1.1,-.4,.4,1.1,1.9,2.5,3.0]){x.beginPath();x.moveTo(ex,ey);x.lineTo(ex+Math.cos(a)*52,ey+Math.sin(a)*34);x.stroke()}
+   x.strokeStyle='#f39a38';x.lineWidth=1.6;for(const a of[-2.55,-2.0,-1.4,-.75,0,.75,1.5,2.2,2.75]){x.beginPath();x.moveTo(ex+Math.cos(a)*10,ey+Math.sin(a)*8);x.lineTo(ex+Math.cos(a)*48,ey+Math.sin(a)*32);x.stroke()}
+   x.strokeStyle='#e44a96';x.lineWidth=2;x.beginPath();x.moveTo(M.X(.0),M.Y(-.005));x.lineTo(M.X(.1),M.Y(-.02));x.lineTo(M.X(.2),M.Y(-.034));x.stroke();
+   x.fillStyle='rgba(200,90,190,.7)';x.beginPath();x.ellipse(M.X(.235),M.Y(-.04),5,9,0,0,6.3);x.fill();x.restore()},
+  finPost:(x,M)=>{M.fin(x,.03,'#dfe8ff','#2f68d8','#a8c4ff');M.fin(x,.6,'#d9b4de','#f2a6cc');M.fin(x,.5,'#a89a30','#e8508c','#c8903a');M.fin(x,.4,'#a85cae','#e84a98','#c05aa8');M.fin(x,.45,'#a05ab0','#e060a8')}},
+ tang:{lb:.8,col:['#fff02a','#fff84a','#eaf460'],split:.6,fin:['#ffe45a','#ffd000'],iris:'#f2e48a',eye:[.165,.05,.034],mid:[[0,-.035],[.1,-.02],[.22,0],[1,0]],skin:{type:'scales',nx:80,ny:15,str:.15,shade:.01},
+  top:[[0,0],[.03,.024],[.07,.05],[.11,.09],[.16,.152],[.22,.222],[.3,.278],[.4,.295],[.5,.27],[.6,.21],[.68,.14],[.74,.09],[.8,.06]],
+  bot:[[0,.0005],[.03,.03],[.07,.062],[.12,.112],[.18,.17],[.25,.225],[.33,.262],[.42,.272],[.52,.245],[.62,.18],[.7,.115],[.75,.08],[.8,.055]],
+  wid:[[0,0],[.04,.012],[.12,.03],[.3,.045],[.5,.04],[.7,.025],[.8,.015]],
+  // photo (Zebrasoma flavescens): dorsal rises from the nape and peaks behind mid-body (~.32TL), sweeps down steeply to the peduncle; anal mirrors it; caudal is a trapezoid with a nearly straight rear edge
+  fins:[{ty:3,u0:.03,tip:[2,3,4,5,6,7],p:[[.805,0],[.8,.05],[.9,.1],[.97,.135],[.985,.05],[.985,-.05],[.97,-.135],[.9,-.1],[.8,-.05]]},
+   {ty:2,u0:.5,tip:[2,3,4,5],p:[[.5,.24],[.19,.15],[.38,.322],[.53,.318],[.64,.262],[.765,.115],[.79,.075],[.78,.062]]},
+   {ty:2,u0:.4,tip:[2,3,4,5,6],p:[[.55,-.24],[.4,-.27],[.55,-.3],[.63,-.265],[.7,-.2],[.765,-.13],[.785,-.075],[.78,-.06]]},
+   ...PF([[.25,-.04,.04],[.24,-.01,.04],[.36,0,.085],[.4,-.07,.085]],[[.3,-.2,.02],[.29,-.19,.02],[.36,-.28,.03]]),...(q<1?[]:[{pair:1,u0:.996,v0:.99,uw:.004,tip:[2],p:[[.766,-.003,.016],[.782,-.003,.016],[.722,-.003,.04],[.745,-.003,.016]]}])],
+  // white caudal spine (scalpel): a small pale blade standing out of each side of the peduncle (medium+ tiers), painted mark on every tier
+  paint:(x,M)=>{x.strokeStyle='rgba(150,150,10,.16)';x.lineWidth=1.1;x.beginPath();x.moveTo(M.X(.2),M.Y(.14));x.quadraticCurveTo(M.X(.235),M.Y(0),M.X(.19),M.Y(-.15));x.stroke();
+   x.fillStyle='#fffdf0';x.beginPath();x.ellipse(M.X(.787),M.Y(-.003),3.2,1.2,0,0,6.3);x.fill()},
+  finPost:(x,M)=>{M.fin(x,.03,'#e6c400','#ffe85a','#ffd400');M.fin(x,.5,'#f4cc00','#ffee70');M.fin(x,.4,'#e8d020','#fff070')}},
+ clown:{big:1,lb:.78,col:['#e8620a','#f47a14','#ff9638'],split:.65,fin:['#111111','#f47a14'],iris:'#f8a040',eye:[.1,.05,.03],skin:{type:'scales',nx:110,ny:20,str:.9,shade:.05},
+  top:[[0,.03],[.012,.068],[.035,.103],[.08,.135],[.15,.163],[.25,.18],[.35,.185],[.45,.18],[.55,.15],[.65,.105],[.72,.078],[.78,.068]],
+  bot:[[0,.022],[.012,.05],[.035,.08],[.08,.108],[.15,.137],[.25,.155],[.35,.16],[.45,.155],[.55,.13],[.65,.09],[.72,.07],[.78,.062]],
+  wid:[[0,.008],[.012,.035],[.035,.055],[.1,.075],[.25,.087],[.4,.085],[.6,.06],[.78,.03]],
+  fins:[{ty:3,u0:.03,tip:[2,3,4,5,6,7,8],p:[[.785,0],[.78,.065],[.84,.13],[.92,.15],[.98,.1],[1,0],[.98,-.1],[.92,-.15],[.84,-.13],[.78,-.065]]},
+   {ty:2,u0:.5,tip:[2,3,4,6,7,8],p:[[.48,.16],[.24,.165],[.27,.24],[.33,.27],[.4,.255],[.45,.215],[.5,.25],[.58,.29],[.66,.27],[.71,.19],[.72,.12]]},
+   {ty:2,u0:.4,tip:[2,3,4],p:[[.6,-.12],[.5,-.15],[.53,-.23],[.6,-.25],[.67,-.22],[.71,-.13],[.7,-.09]]},
+   {pair:1,u0:.6,tip:[2,3,4],p:[[.27,-.03,.07],[.26,0,.07],[.33,.03,.1],[.4,0,.12],[.39,-.06,.1]]},{pair:1,u0:.45,tip:[2,3],p:[[.3,-.14,.04],[.29,-.13,.04],[.36,-.25,.06],[.4,-.22,.05]]}],
+  finPost:x=>{x.fillStyle='#f47a14';x.fillRect(0,0,256,11);x.fillStyle='#111';x.fillRect(0,0,256,2.6);x.fillStyle='#f58a2a';x.fillRect(.6*256-4,0,8,11)},
+  paint:(x,M)=>{const band=(uc,bw,bul)=>{for(const[col,e]of[['#111',.009],['#fff',0]]){x.fillStyle=col;x.beginPath();const pts=[];for(let i=0;i<=16;i++){const y=-.26+i*.52/16,k=1-Math.min(1,(y/.2)*(y/.2));pts.push([uc-bul*k,y])}
+    pts.forEach(([u,y],i)=>{const X=M.X(u-bw/2-e),Y=M.Y(y);i?x.lineTo(X,Y):x.moveTo(X,Y)});for(let i=pts.length-1;i>=0;i--){const[u,y]=pts[i];x.lineTo(M.X(u+bw/2+e),M.Y(y))}x.fill()}};
+   band(.19,.05,-.02);band(.47,.075,.045);band(.74,.035,0)}}};
+function buildPrey(g,v,L,qq){const P=PV[v];specBody(g,P,L,...(P.big?LOD(qq,[13,12],[15,13],[15,12]):LOD(qq,[9,10],[12,12],UL?[15,13]:[15,12])),true)}
+function preyTex(v){const P=PV[v],M=specMap(P),mid=P.mid?crv(P.mid):()=>0;return tex((x,w,h)=>{counter(x,w,h,P.col[0],P.col[1],P.col[2],P.split||.55);P.paint&&P.paint(x,M);
+ const[eu,ey,er]=P.eye,ex=M.X(eu),eY=M.Y(ey+mid(eu)),rx=er*M.sx,ry=er*M.sy;x.fillStyle=P.iris||'#f4f0e0';x.beginPath();x.ellipse(ex,eY,rx,ry,0,0,6.3);x.fill();
+ x.fillStyle='#0a0a0a';x.beginPath();x.ellipse(ex,eY,rx*.6,ry*.6,0,0,6.3);x.fill();x.fillStyle='rgba(255,255,255,.85)';x.beginPath();x.arc(ex+rx*.25,eY-ry*.3,Math.max(.8,rx*.16),0,6.3);x.fill()},
+ P.fin[0],P.fin[1],P.skin||{type:'scales',nx:80,ny:15,str:1,shade:.06},P.finPost?x=>P.finPost(x,M):null)}
+// ---------- locomotion: per-species swimming parameters (sources: reference/SOURCES.md) ----------
+// base = head-amplitude fraction, envP = envelope exponent (amplitude grows toward the tail), lam = body wavelength in body lengths,
+// ampT = tail-tip half-amplitude (fraction of length), Ubl = body lengths/s at speed 1, St = Strouhal number, labr = pectoral (labriform) reliance,
+// bank = roll into turns (rad), kd = drag coefficient of the inertia model, fp = pectoral beat Hz
+const LOCO={
+ shark:{mode:'carangiform',base:.1,envP:2.2,lam:1,ampT:.09,Ubl:.45,St:.3,labr:0,bank:.32,kd:.6,fp:.5},
+ barracuda:{mode:'carangiform',base:.06,envP:2.4,lam:1,ampT:.085,Ubl:.9,St:.3,labr:0,bank:.22,kd:1.2,fp:1},
+ grouper:{mode:'subcarangiform',base:.08,envP:1.8,lam:.9,ampT:.09,Ubl:.45,St:.3,labr:.45,bank:.15,kd:1,fp:1.2},
+ eel:{mode:'anguilliform',base:.3,envP:1.15,lam:.62,ampT:.075,Ubl:.45,St:.35,labr:0,bank:.05,kd:1.2,fp:1},
+ clown:{mode:'labriform',base:.07,envP:2,lam:1,ampT:.1,Ubl:1.6,St:.3,labr:.6,bank:.2,kd:2.5,fp:2.4},
+ chromis:{mode:'labriform',base:.06,envP:2,lam:1,ampT:.1,Ubl:3,St:.3,labr:.8,bank:.25,kd:4,fp:4},
+ damsel:{mode:'labriform',base:.06,envP:2,lam:1,ampT:.1,Ubl:3,St:.3,labr:.7,bank:.25,kd:4,fp:4},
+ sardine:{mode:'carangiform',base:.05,envP:2.3,lam:1,ampT:.09,Ubl:3,St:.3,labr:0,bank:.2,kd:4,fp:4},
+ wrasse:{mode:'labriform',base:.06,envP:2,lam:1,ampT:.1,Ubl:3,St:.3,labr:.95,bank:.3,kd:4,fp:3.5},
+ tang:{mode:'labriform',base:.07,envP:1.9,lam:1,ampT:.1,Ubl:2.5,St:.3,labr:.85,bank:.25,kd:3.5,fp:3}};
+
 function buildTurtle(){const key='turtle@'+QN;let K=cache[key];const lerp=(a,b,t)=>a+(b-a)*t;
  // Realistic green/hawksbill sea turtle. Head at +X, +Y up. Carapace ~1.0 long, 0.78 wide.
- const AF=.47,AB=.53,BW=.39,HD=.17;
+ const AF=.47,AB=.53,BW=.39,HD=.2;
  const outl=th=>{const c=Math.cos(th),s=Math.sin(th);let x=c*(c>0?AF:AB),z=BW*s*(1-.2*Math.max(0,-c));x-=.018*Math.exp(-Math.pow(Math.atan2(s,c)/.16,2));const ser=1-.014*Math.max(0,-c)*Math.abs(Math.sin(th*11));return[x*ser,z*ser]};
  function mkG(pos,uv,idx){const g=new T.BufferGeometry();g.setAttribute('position',new T.Float32BufferAttribute(pos,3));g.setAttribute('uv',new T.Float32BufferAttribute(uv,2));g.setIndex(idx);g.computeVertexNormals();g.computeBoundingSphere();return g}
  // seam-welded normals (grid seams/poles)
@@ -2084,7 +2310,7 @@ function buildTurtle(){const key='turtle@'+QN;let K=cache[key];const lerp=(a,b,t
    return[x,dome+keel+flare+.01,z,.5+x/(2*.56),.5+z/(2*.42)]};
   const car=ccw(grid(NS,NR,(u,v)=>{const th=u*2*PI,rho=Math.max(1e-4,v);return top(rho,th)},false),()=>[0,-.05,0]);
   // plastron + bridge: rim ring at rho=1 down to a slightly convex belly
-  const bot=ccw(grid(NS,NR>>1,(u,v)=>{const th=u*2*PI,rho=1-v*.9999;const o=outl(th),x=o[0]*rho*.97,z=o[1]*rho*.92;const y=v<.08?lerp(-.012,-.05,v/.08):-.05-.035*Math.pow(Math.max(0,1-rho*rho),.5);return[x,y,z,.5+x/(2*.56),.5+z/(2*.42)]},true),()=>[0,.05,0]);
+  const bot=ccw(grid(NS,NR>>1,(u,v)=>{const th=u*2*PI,rho=1-v*.9999;const o=outl(th),x=o[0]*rho*.97,z=o[1]*rho*.92;const y=v<.08?lerp(-.012,-.058,v/.08):-.058-.05*Math.pow(Math.max(0,1-rho*rho),.5);return[x,y,z,.5+x/(2*.56),.5+z/(2*.42)]},true),()=>[0,.05,0]);
   const rimG=ccw(grid(NS,2,(u,v)=>{const th=u*2*PI,o=outl(th);const y=lerp(-.012,.0,v),k=lerp(.99,1.0,v);return[o[0]*k,y,o[1]*k,.5+o[0]/(2*.56),.5+o[1]/(2*.42)]},false),()=>[0,0,0]);
   // head: beaked, slightly flat-topped; s=0 is the beak tip. UV: u around, v along
   const HN=[10,14,20][q]+(UL?6:0),HV=[10,14,20][q]+(UL?6:0);const hL=.2;
@@ -2093,7 +2319,7 @@ function buildTurtle(){const key='turtle@'+QN;let K=cache[key];const lerp=(a,b,t
    if(s<.12&&c>0)y-=.01*(1-s/.12)*c;return[hL*(1-s)-.03,y,w*sn,u,1-v]},false),()=>[.07,0,0]);
   const jawG=ccw(grid(HN,HV>>1,(u,v)=>{const th=u*2*PI,c=Math.cos(th),sn=Math.sin(th),s=v;const a=Math.sqrt(clamp(s/.15,0,1)*(2-clamp(s/.15,0,1)))*(1-.3*s);return[.1*(1-s),(c>0?.004*c:.024*c)*a,.05*a*sn,u,.5-v*.5]},false),()=>[.05,0,0]);
   // flippers: hydrofoil sections lofted along the span (+Z), leading edge +X
-  const flipper=(Lf,chord,thick,sweep,ns,nc)=>ccw(grid(ns,nc,(u,v)=>{const s=u,ch=chord(s),le=-sweep(s);const a=v*2*PI,cc=.5-.5*Math.cos(a);const tk=thick(s)*Math.sqrt(cc)*(1-cc)*2.6*(a<PI?1:-.75);
+  const flipper=(Lf,chord,thick,sweep,ns,nc)=>ccw(grid(ns,nc,(u,v)=>{const s=u,ch=chord(s),le=-sweep(s);const a=v*2*PI,cc=.5-.5*Math.cos(a);const tk=thick(s)*Math.sqrt(cc)*(1-cc)*2.6*(a<PI?1:-.75)+ch*.22*cc*(1-cc)*(1-.35*s)-.045*Lf*s*s; // + camber (upper surface convex) and a slight tip droop
    return[le-cc*ch,tk,s*Lf,s,v]},false),k=>[0,0,0]);
   const NSf=[10,16,22][q]+(UL?8:0),NCf=[10,14,20][q]+(UL?6:0);
   const fl=flipper(.6,s=>(s<.22?.1+.08*s/.22:.18*(1-Math.pow((s-.22)/.78,1.25)))+.014,s=>.03*(1-s*.8)+.003,s=>.13*Math.pow(s,1.6)-.01,NSf,NCf);
@@ -2101,10 +2327,10 @@ function buildTurtle(){const key='turtle@'+QN;let K=cache[key];const lerp=(a,b,t
   const nk=new T.CylinderGeometry(.052,.062,.12,[10,14,20][q],4,true);nk.rotateZ(-PI/2);
   // textures
   const SW=TW,SH=TW*3/4|0;const cv=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
-  function bake(c,Hf,w,h,str){const x=c.getContext('2d'),im=x.getImageData(0,0,w,h),d=im.data;for(let i=0;i<w*h;i++){const m=.74+.42*Hf[i];d[i*4]=Math.min(255,d[i*4]*m);d[i*4+1]=Math.min(255,d[i*4+1]*m);d[i*4+2]=Math.min(255,d[i*4+2]*m)}x.putImageData(im,0,0);
-   const nc=cv(w,h),nx=nc.getContext('2d'),ni=nx.createImageData(w,h),nd=ni.data,S=str*w/512;for(let y=0;y<h;y++)for(let xx=0;xx<w;xx++){const xm=Math.max(0,xx-1),xp=Math.min(w-1,xx+1),ym=Math.max(0,y-1),yp=Math.min(h-1,y+1);
-    const gx=Hf[y*w+xp]-Hf[y*w+xm],gy=Hf[yp*w+xx]-Hf[ym*w+xx];const a=-gx*S,b=gy*S,l=Math.hypot(a,b,1),o=(y*w+xx)*4;nd[o]=(a/l*.5+.5)*255;nd[o+1]=(b/l*.5+.5)*255;nd[o+2]=(1/l*.5+.5)*255;nd[o+3]=255}nx.putImageData(ni,0,0);
-   const map=new T.CanvasTexture(c);map.colorSpace=T.SRGBColorSpace;map.anisotropy=4;const nm=new T.CanvasTexture(nc);if(T.NoColorSpace)nm.colorSpace=T.NoColorSpace;return{map,normalMap:nm}}
+  function bake(c,Hf,w,h,str,cm){cm=cm==null?.42:cm;const x=c.getContext('2d'),im=x.getImageData(0,0,w,h),d=im.data;for(let i=0;i<w*h;i++){const m=1-cm*.62+cm*Hf[i];d[i*4]=Math.min(255,d[i*4]*m);d[i*4+1]=Math.min(255,d[i*4+1]*m);d[i*4+2]=Math.min(255,d[i*4+2]*m)}x.putImageData(im,0,0);
+   const nc=cv(w,h),nx=nc.getContext('2d'),ni=nx.createImageData(w,h),nd=ni.data,S=str*w/512;let tA=0;for(let y=0;y<h;y++)for(let xx=0;xx<w;xx++){const xm=Math.max(0,xx-1),xp=Math.min(w-1,xx+1),ym=Math.max(0,y-1),yp=Math.min(h-1,y+1);
+    const gx=Hf[y*w+xp]-Hf[y*w+xm],gy=Hf[yp*w+xx]-Hf[ym*w+xx];const a=-gx*S,b=gy*S,l=Math.hypot(a,b,1),o=(y*w+xx)*4;tA+=Math.acos(1/l);nd[o]=(a/l*.5+.5)*255;nd[o+1]=(b/l*.5+.5)*255;nd[o+2]=(1/l*.5+.5)*255;nd[o+3]=255}nx.putImageData(ni,0,0);
+   const map=new T.CanvasTexture(c);map.colorSpace=T.SRGBColorSpace;map.anisotropy=4;const nm=new T.CanvasTexture(nc);if(T.NoColorSpace)nm.colorSpace=T.NoColorSpace;nm.userData={tiltDeg:tA/(w*h)*180/PI};return{map,normalMap:nm}}
   // scute field: returns [scuteId, edgeDistance(world m), cx, cz] for a top-view point
   const VB=[1.2,.6,.22,-.16,-.52,-1.2],CB=[1.2,.42,.04,-.36,-1.2];
   function scute(x,z){const ax=x>0?AF:AB,bz=BW*(1-.2*Math.max(0,-x/AB));const X=x/ax,Z=z/bz,rho=Math.hypot(X,Z),th=Math.atan2(Z,X);
@@ -2118,31 +2344,31 @@ function buildTurtle(){const key='turtle@'+QN;let K=cache[key];const lerp=(a,b,t
    for(let py=0;py<SH;py++)for(let px=0;px<SW;px++){const wx=(px/SW-.5)*2*.56,wz=(.5-py/SH)*2*.42,S=scute(wx,wz),id=S[0],e=S[1];const groove=sst(0,.007,e),inner=Math.min(1,e/.05);
     // growth rings parallel to the scute edges + fine keratin grain + per-scute tone
     const rings=.5+.5*Math.sin(e*260+vnz(wx*30,wz*30,3)*2),grain=vnz(wx*160,wz*40,5),tone=hs(id,9);
-    Hf[py*SW+px]=groove*(.55+.25*Math.sqrt(inner)+.06*rings)+.08*grain;
+    Hf[py*SW+px]=groove*(.6+.2*Math.sqrt(inner)+.03*rings)+.015*grain;
     // hawksbill/green palette: amber-olive with dark radiating streaks
     const ang=Math.atan2(wz-(id<100?0:wz),wx)+vnz(wx*9,wz*9,7)*3,ray=Math.pow(.5+.5*Math.sin(ang*7+vnz(wx*14,wz*14,8)*6+id),2.2);
     let r=74+52*ray+24*tone,g=64+34*ray+16*tone,b=38+14*ray;const dark=vnz(wx*22,wz*22,11);r*=.75+.35*dark;g*=.75+.35*dark;b*=.8+.3*dark;if(id>=100){r*=1.12;g*=1.08}
-    const gm=.5+.5*groove;const o=(py*SW+px)*4;d[o]=r*gm;d[o+1]=g*gm;d[o+2]=b*gm;d[o+3]=255}x.putImageData(im,0,0);shellT=bake(c,Hf,SW,SH,3.2)}
+    const gm=.5+.5*groove;const o=(py*SW+px)*4;d[o]=r*gm;d[o+1]=g*gm;d[o+2]=b*gm;d[o+3]=255}x.putImageData(im,0,0);shellT=bake(c,Hf,SW,SH,1.7,.16)}
   let plasT;{const w=SW>>1,h=(SW*3/4|0)>>1,c=cv(w,h),x=c.getContext('2d'),im=x.createImageData(w,h),d=im.data,Hf=new Float32Array(w*h);const seams=[.62,.36,.05,-.32,-.62];
-   for(let py=0;py<h;py++)for(let px=0;px<w;px++){const X=(px/w-.5)*2,Z=(.5-py/h)*2;let e=Math.abs(Z)*.4;for(const sx of seams)e=Math.min(e,Math.abs(X-sx-.05*Math.abs(Z))*.4);const gr=sst(0,.012,e);Hf[py*w+px]=gr*.7+.15*vnz(X*40,Z*40,4);
-    const t=vnz(X*6,Z*6,6);const o=(py*w+px)*4;d[o]=(222+20*t)*(.55+.45*gr);d[o+1]=(198+18*t)*(.55+.45*gr);d[o+2]=(130+20*t)*(.55+.45*gr);d[o+3]=255}x.putImageData(im,0,0);plasT=bake(c,Hf,w,h,2)}
+   for(let py=0;py<h;py++)for(let px=0;px<w;px++){const X=(px/w-.5)*2,Z=(.5-py/h)*2;let e=Math.abs(Z)*.4;for(const sx of seams)e=Math.min(e,Math.abs(X-sx-.05*Math.abs(Z))*.4);const gr=sst(0,.012,e);Hf[py*w+px]=gr*.85+.03*vnz(X*40,Z*40,4);
+    const t=vnz(X*6,Z*6,6);const o=(py*w+px)*4;d[o]=(222+20*t)*(.55+.45*gr);d[o+1]=(198+18*t)*(.55+.45*gr);d[o+2]=(130+20*t)*(.55+.45*gr);d[o+3]=255}x.putImageData(im,0,0);plasT=bake(c,Hf,w,h,1,.15)}
   // skin: polygonal scale plates (dark centres, pale borders); beak band on the head texture
   const skinTex=(w,h,nx,ny,beak)=>{const c=cv(w,h),x=c.getContext('2d'),im=x.createImageData(w,h),d=im.data,Hf=new Float32Array(w*h);
    for(let py=0;py<h;py++)for(let px=0;px<w;px++){const U=px/w*nx,V=py/h*ny,i0=Math.floor(U),j0=Math.floor(V);let d1=9,d2=9,id=0;for(let j=j0-1;j<=j0+1;j++)for(let i=i0-1;i<=i0+1;i++){const ii=((i%nx)+nx)%nx,cx=i+.5+(hs(ii*131+j,1)-.5)*.8,cy=j+.5+(hs(ii*131+j,2)-.5)*.8,dd=Math.hypot(U-cx,V-cy);if(dd<d1){d2=d1;d1=dd;id=ii*131+j}else if(dd<d2)d2=dd}
-    const edge=sst(0,beak?.09:.12,d2-d1),t=hs(id,3);Hf[py*w+px]=edge*(.6+.4*Math.sqrt(Math.max(0,1-d1)))+.1*vnz(U*6,V*6,2);
+    const edge=sst(0,beak?.09:.12,d2-d1),t=hs(id,3);Hf[py*w+px]=edge*(.7+.3*Math.sqrt(Math.max(0,1-d1)))+.03*vnz(U*6,V*6,2);
     let r=lerp(226,96+44*t,edge),g=lerp(212,82+34*t,edge),b=lerp(160,46+16*t,edge);const belly=beak?0:Math.max(0,Math.cos(px/w*2*PI-PI))*0;
     if(beak){const v=py/h;const bk=1-sst(.15,.24,v);if(bk>0){r=lerp(r,128,bk);g=lerp(g,108,bk);b=lerp(b,72,bk);Hf[py*w+px]=lerp(Hf[py*w+px],.5+.1*vnz(U*30,V*30,5),bk)}}
-    const o=(py*w+px)*4;d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255}x.putImageData(im,0,0);return bake(c,Hf,w,h,2.4)};
+    const o=(py*w+px)*4;d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255}x.putImageData(im,0,0);return bake(c,Hf,w,h,1.1,.2)};
   const skT=skinTex(SW>>1,SW>>2,22,14,false),hdT=skinTex(SW>>1,SW>>2,14,9,true);
   K=cache[key]={car,bot,rim:rimG,head:headG,jaw:jawG,fl,fr,nk,shellT,plasT,skT,hdT,eye:new T.SphereGeometry(.021,[8,12,16][q],[6,8,12][q]),lidU:new T.SphereGeometry(.0195,[8,12,16][q],6,0,2*PI,0,PI*.55),lidD:new T.SphereGeometry(.0195,[8,12,16][q],6,0,2*PI,PI*.45,PI*.55),claw:new T.ConeGeometry(.008,.035,5)}}
  const Lm=o=>new T.MeshLambertMaterial(o);
  const mShell=Lm({map:K.shellT.map,normalMap:K.shellT.normalMap}),mPlas=Lm({map:K.plasT.map,normalMap:K.plasT.normalMap}),mSkin=Lm({map:K.skT.map,normalMap:K.skT.normalMap,side:T.DoubleSide}),mHead=Lm({map:K.hdT.map,normalMap:K.hdT.normalMap,side:T.DoubleSide});
- if(T.Vector2){mShell.normalScale=new T.Vector2(1.2,1.2);mSkin.normalScale=new T.Vector2(1.1,1.1)}
+ wetSkin(mShell,WET.turtle);wetSkin(mPlas,WET.turtle);wetSkin(mSkin,WET.turtleSkin);wetSkin(mHead,WET.turtleSkin);if(T.Vector2){mShell.normalScale=new T.Vector2(.6,.6);mPlas.normalScale=new T.Vector2(.5,.5);mSkin.normalScale=new T.Vector2(.45,.45);mHead.normalScale=new T.Vector2(.5,.5)}
  const G=new T.Group(),B=new T.Group();G.add(B);const body=new T.Group();B.add(body);
  const shell=new T.Mesh(K.car,mShell),plas=new T.Mesh(K.bot,mPlas),rim=new T.Mesh(K.rim,mShell);body.add(shell,plas,rim);
  // neck + head + jaw + eyes with lids
- const neckP=new T.Group();neckP.position.set(.4,-.015,0);body.add(neckP);const neck=new T.Mesh(K.nk,mSkin);neck.position.x=.03;neckP.add(neck);
- const headP=new T.Group();headP.position.set(.1,.005,0);neckP.add(headP);const head=new T.Mesh(K.head,mHead);headP.add(head);
+ const neckP=new T.Group();neckP.position.set(.385,-.015,0);body.add(neckP);const neck=new T.Mesh(K.nk,mSkin);neck.position.x=.03;neckP.add(neck);
+ const headP=new T.Group();headP.position.set(.09,.005,0);headP.scale.set(.95,1.22,1.22);neckP.add(headP);const head=new T.Mesh(K.head,mHead);headP.add(head);
  const jawP=new T.Group();jawP.position.set(.03,-.014,0);headP.add(jawP);const jaw=new T.Mesh(K.jaw,mHead);jawP.add(jaw);
  const mEye=Lm({color:0x2a1a0c}),mLid=Lm({map:K.skT.map,color:0xb8b090});const eyes=[];
  for(const z of[1,-1]){const so=new T.Group();so.position.set(.105,.018,.043*z);so.rotation.y=z*.85;headP.add(so);const ball=new T.Mesh(K.eye,mEye);so.add(ball);const hl=new T.Mesh(K.eye,new T.MeshBasicMaterial({color:0xffffff}));hl.scale.setScalar(.22);hl.position.set(.008,.008,.012);ball.add(hl);
@@ -2158,16 +2384,23 @@ function buildTurtle(){const key='turtle@'+QN;let K=cache[key];const lerp=(a,b,t
   bite:{amp:.25,rate:.6,bite:1},startle:{amp:1.2,rate:2.6,retract:1},stunned:{amp:.06,rate:.3,roll:.5,bob:.5,glide:.3},eat:{amp:.15,rate:.5,eat:1,rud:.5},idle:{amp:.18,rate:.45,breath:1,bob:.4,scull:.6,rud:.6}};
  const bl=blender(TTG,TB);let ph=0,lt=null,ts=0,sp=.5,blk=0,blT=-1,nextBl=1.5+rnd()*3;const hf=spring(7,.6),hp=spring(7,.6),rf=spring(8,.5),bodyH=spring(6,.7);
  const face={yaw:0,pitch:0,blink:null,jaw:0,retract:0,wave:0,wide:0};G.face=face;
- const D=.56;// downstroke fraction
+ const D=.56,TS={v:null,g:0,e:.5};G.motion={v:0,eff:0,hz:0,glide:0};// downstroke fraction
  function stroke(f){// returns [elevDown, sweepFwd, featherLEup] for phase f in [0,1)
   const dn=f<D,u=dn?f/D:(f-D)/(1-D),k=u*u*(3-2*u);const e=dn?lerp(-.8,.6,k):lerp(.6,-.8,k);const sw=dn?lerp(.38,-.5,k):lerp(-.5,.38,k);
   const fe=-.38+1.15*(sst(D-.06,D+.1,f)-sst(.9,1,f))+.1*Math.sin(f*2*PI);return[e,sw,fe]}
  G.animate=(t,speed=.5,turn=0,state)=>{const dt=lt==null?0:Math.min(DTMAX,Math.max(0,t-lt));lt=t;const{cur:c,ev}=bl(dt,state,turn);G.state=state||'cruise';
-  sp+=(speed-sp)*ex(dt,4);ts+=(clamp(turn,-1,1)-ts)*ex(dt,4);ph+=dt*(.5+sp*.55)*c.rate;const f=ph-Math.floor(ph);const S=stroke(f),A=c.amp;
+  sp+=(speed-sp)*ex(dt,4);ts+=(clamp(turn,-1,1)-ts)*ex(dt,4);
+  // inertia/drag velocity model (substepped -> frame-rate independent); effort drives stroke rate (adult green turtles ~0.3-0.7 Hz) and amplitude
+  const tg=clamp(+speed||0,0,1.5);if(TS.v==null)TS.v=tg;for(let r=dt;r>1e-6;r-=1/120){const h=Math.min(r,1/120);TS.v=Math.max(0,TS.v+(1.2*(tg*tg-TS.v*TS.v)+.7*(tg-TS.v))*h)}
+  TS.e+=(clamp(TS.v+1.2*(tg-TS.v),0,1.8)-TS.e)*ex(dt,6);const eff=TS.e;
+  // stroke-and-glide: at low effort the turtle holds the flippers swept back after the downstroke and coasts
+  TS.g+=((1-sst(.25,.75,eff))*.42*(1-c.glide)*(1-c.scull)-TS.g)*ex(dt,1.5);const gd=TS.g;
+  ph+=dt*(.22+.5*eff)*c.rate;const fr=ph-Math.floor(ph),a_=D*(1-gd);let f,gw=0;if(fr<a_)f=fr/(1-gd);else if(fr<a_+gd){f=D;gw=Math.sin(PI*(fr-a_)/Math.max(gd,1e-3))*sst(0,.3,gd)}else f=(fr-gd)/(1-gd);
+  const cg=Math.min(1,c.glide+gw*.85),S=stroke(f),A=c.amp*(.75+.3*Math.min(eff,1.2))*(1-gw*.6);G.motion.v=TS.v;G.motion.eff=eff;G.motion.hz=(.22+.5*eff)*c.rate;G.motion.glide=gw;
   for(const F of fs){const sd=F.side;if(!F.rear){
     // outer flipper works harder in a turn; scull = small figure-eight; glide = swept back, level; flare = spread forward, leading edge up
     const as=1+c.asym*ts*sd*.55,a=A*as,sc=c.scull*Math.sin(f*4*PI)*.25;const wave=sd>0?face.wave:0;
-    const el=S[0]*a+sc*.6+c.glide*.18-c.flare*.15-wave*1.3+Math.sin(t*9)*.25*wave;const sw=S[1]*a+sc+c.glide*-.95+c.flare*.75+wave*.6;const fe=S[2]*Math.min(1,a+.2)+c.glide*.05+c.flare*.6+c.scull*Math.cos(f*4*PI)*.3;
+    const el=S[0]*a+sc*.6+cg*.18-c.flare*.15-wave*1.3+Math.sin(t*9)*.25*wave;const sw=S[1]*a+sc+cg*-.95+c.flare*.75+wave*.6;const fe=S[2]*Math.min(1,a+.2)+cg*.05+c.flare*.6+c.scull*Math.cos(f*4*PI)*.3;
     F.elev.rotation.x=sd*el;F.yaw.rotation.y=sd*sw;F.fea.rotation.z=fe}
    else{const lag=Math.sin((f-.2)*2*PI);const rud=rf.step(ts*.6*(1+c.flare),dt);F.yaw.rotation.y=sd*-2.35+rud*.8-sd*c.flare*.3+sd*c.rud*.25*Math.sin(f*2*PI*2);F.elev.rotation.x=sd*(.12+lag*.08*A+c.rud*.2*lag+c.flare*.25);F.fea.rotation.z=-.1+rud*sd*.4}}
   // body heave/pitch follows the downstroke; head counter-stabilises; roll into turns
@@ -2175,7 +2408,7 @@ function buildTurtle(){const key='turtle@'+QN;let K=cache[key];const lerp=(a,b,t
   B.rotation.x=c.roll*(.8+.35*Math.sin(ev.clock*1.3))*(1-ev.turnW*(1+ev.tsg))-ts*.18*c.asym+ev.n[2]*.03;
   shell.scale.y=plas.scale.y=1+c.breath*.02*Math.sin(ev.clock*1.6);
   const bp=pulse(ev.clock/.8,.35),ep=pulse(ev.clock/1.6,.5);const ret=Math.max(c.retract,face.retract);
-  neckP.position.x=.4-ret*.09+c.bite*bp*.06;neckP.rotation.set(0,hf.step(ts*.3+face.yaw*.7+ev.n[0]*.05,dt),hp.step(-heave*3+face.pitch*.7-c.eat*ep*.4+c.bite*bp*.1+ev.n[1]*.03,dt));
+  neckP.position.x=.385-ret*.09+c.bite*bp*.06;neckP.rotation.set(0,hf.step(ts*.3+face.yaw*.7+ev.n[0]*.05,dt),hp.step(-heave*3+face.pitch*.7-c.eat*ep*.4+c.bite*bp*.1+ev.n[1]*.03,dt));
   headP.rotation.set(0,face.yaw*.3,face.pitch*.3);jawP.rotation.z=-clamp(.02+c.bite*bp*.5+c.eat*ep*.45+face.jaw*.5,0,.6);
   // blinks (own timer unless a host drives face.blink)
   nextBl-=dt;if(blT<0&&nextBl<=0){blT=0;nextBl=2+rnd()*4}if(blT>=0){blT+=dt;blk=blT<.08?sst(0,.08,blT):1-sst(.08,.22,blT);if(blT>.22){blT=-1;blk=0}}
@@ -2183,58 +2416,82 @@ function buildTurtle(){const key='turtle@'+QN;let K=cache[key];const lerp=(a,b,t
   tail.rotation.y=Math.sin(ph*2*PI*.5)*.15+ts*.3};
  G.states=STATES;G.parts={body,shell,plastron:plas,neck:neckP,head:headP,jaw:jawP,eyes,flippers:fs};return G}
 
-function buildOcto(){let K=cache['octo@'+q];if(!K){const mt=GB();// mantle: loft along x tilted up later; head end at +x
-  mt.loft(.42,.62,...LOD(q,[12,14],[14,16],[18,18]),s=>{const r=s<.85?Math.pow(Math.sin(PI*(.08+s*.6)),.7):Math.sin(PI*(.08+.85*.6))*(1-(s-.85)/.15*.6);return{t:.2*r,b:.17*r,w:.19*r,y:0}},.2);
-  
+function buildOcto(){const ML=.46,AR=.86;let K=cache['octo@'+q];if(!K){const mt=GB();
+  // mantle (Octopus vulgaris / cyanea, reference/octopus): rounded sac lofted from the apex (s=0, x=+ML) to the head (s=1, x=0) where the eyes sit; it pivots about the head
+  mt.loft(ML,ML,...LOD(q,[12,14],[14,16],[17,17]),s=>{const r=s<.5?Math.pow(Math.max(0,1-Math.pow((.5-s)/.5,2)),.5):s<.74?1-.3*sst(.5,.74,s):s<.92?.7+.14*sst(.74,.88,s):.84-.3*sst(.92,1,s);return{t:.16*r,b:.15*r,w:.165*r,y:0}},.17);
+  // 8 arms, ~2.1x mantle length, tapering from a thick root; inter-brachial web flattens and widens the bases
   const ar=GB(),aA=[],aS=[],NA=8,[SEG,RS]=LOD(q,[9,5],[11,6],[13,7]);for(let a=0;a<NA;a++){const ang=a/NA*2*PI+PI/NA,b0=ar.pos.length/3;
-   for(let i=0;i<=SEG;i++){const s=i/SEG,rad=.07*(1-s*.88)+.004,cx=Math.cos(ang)*(.1+s*.55),cz=Math.sin(ang)*(.1+s*.55),cy=-s*.22+s*s*.12;
-    for(let j=0;j<=RS;j++){const q=j/RS*2*PI,nx=Math.cos(ang),nz=Math.sin(ang),c=Math.cos(q),sn=Math.sin(q);
-     ar.pos.push(cx-nz*rad*c,cy+rad*sn,cz+nx*rad*c);ar.uv.push(.1+.8*(1-s),sn>0?.75:.15);aA.push(a);aS.push(s)}}
-   for(let i=0;i<SEG;i++)for(let j=0;j<RS;j++){const p=b0+i*(RS+1)+j,q=p+RS+1;ar.idx.push(p,q,p+1,q,q+1,p+1)}}
-  const tx=tex((x,w,h)=>{counter(x,w,h,'#9a3a24','#c8603a','#f0b090',.6);speck(x,w,h,160,'rgba(110,30,20,.45)',1.5,4,10,h*.7);speck(x,w,h,60,'rgba(255,220,190,.35)',1,2.5,10,h*.7);
-   x.fillStyle='#f6d6b8';for(let i=0;i<40;i++){x.beginPath();x.arc(10+i*6,h*.82,2.2,0,6.3);x.fill()}},'#a84a2c','#c8603a',{type:'papillae',nx:60,ny:12,str:2.2,shade:.18});
-  const ec=document.createElement('canvas');ec.width=64;ec.height=32;{const x=ec.getContext('2d');x.fillStyle='#e8c860';x.fillRect(0,0,64,32);x.fillStyle='#c89a30';x.fillRect(0,0,64,8);x.fillStyle='#111';x.beginPath();x.ellipse(48,16,9,3.2,0,0,6.3);x.fill();x.fillStyle='rgba(255,255,255,.85)';x.beginPath();x.arc(45,12,1.6,0,6.3);x.fill()}
+   for(let i=0;i<=SEG;i++){const s=Math.pow(i/SEG,1.2),rad=.088*Math.pow(1-s,.95)+.007,R0=.1+s*AR,cx=Math.cos(ang)*R0,cz=Math.sin(ang)*R0,cy=-s*.18+s*s*.1,web=Math.max(0,PI*R0/NA-rad)*(1-sst(0,.3,s))*.95,fl=1-.35*(1-sst(0,.3,s));
+    for(let j=0;j<=RS;j++){const qa=j/RS*2*PI,nx=Math.cos(ang),nz=Math.sin(ang),c=Math.cos(qa),sn=Math.sin(qa),tw=rad+web*Math.sqrt(Math.abs(c));
+     ar.pos.push(cx-nz*tw*c,cy+rad*fl*sn,cz+nx*tw*c);ar.uv.push(.1+.8*(1-s),sn>0?.75:.15);aA.push(a);aS.push(s)}}
+   for(let i=0;i<SEG;i++)for(let j=0;j<RS;j++){const p=b0+i*(RS+1)+j,qq=p+RS+1;ar.idx.push(p,qq,p+1,qq,qq+1,p+1)}}
+  const tx=tex((x,w,h)=>{counter(x,w,h,'#6e4a30','#9c6c42','#dcb890',.6);for(let i=0;i<90;i++){x.fillStyle=`rgba(${70+rnd()*40|0},${40+rnd()*20|0},25,.4)`;x.beginPath();x.ellipse(rnd()*w,12+rnd()*h*.7,2+rnd()*5,1.5+rnd()*3,rnd()*3,0,6.3);x.fill()}
+   speck(x,w,h,120,'rgba(245,232,212,.6)',.8,2,12,h*.72);x.fillStyle='#f2dcc4';for(let i=0;i<40;i++){x.beginPath();x.arc(10+i*6,h*.82,2.2,0,6.3);x.fill()}},'#7a5236','#9c6c42',{type:'papillae',nx:60,ny:12,str:2.2,shade:.18});
+  const ec=document.createElement('canvas');ec.width=64;ec.height=32;{const x=ec.getContext('2d');x.fillStyle='#d8c070';x.fillRect(0,0,64,32);x.fillStyle='#9a7a40';x.fillRect(0,0,64,8);x.fillStyle='#111';x.beginPath();x.ellipse(48,16,9,3.2,0,0,6.3);x.fill();x.fillStyle='rgba(255,255,255,.85)';x.beginPath();x.arc(45,12,1.6,0,6.3);x.fill()}
   const et=new T.CanvasTexture(ec);et.colorSpace=T.SRGBColorSpace;
   K=cache['octo@'+q]={mt:mt.geo(),ar:ar.geo({aArm:aA,aS:aS}),tx,eg:new T.SphereGeometry(.05,10,6),et,lg:new T.SphereGeometry(.062,8,3,0,PI*2,0,PI*.5)}}
- const mm=new T.MeshLambertMaterial({map:K.tx.map,normalMap:K.tx.normalMap}),am=new T.MeshLambertMaterial({map:K.tx.map,normalMap:K.tx.normalMap,side:T.DoubleSide}),U={uPh:{value:0},uSp:{value:0},uTurn:{value:0},uSpread:{value:0},uCurl:{value:1},uCurlIn:{value:0}};
- am.onBeforeCompile=sh=>{Object.assign(sh.uniforms,U);sh.vertexShader='uniform float uPh,uSp,uTurn,uSpread,uCurl,uCurlIn;attribute float aArm,aS;\n'+sh.vertexShader.replace('#include <begin_vertex>',
-  `vec3 transformed=vec3(position);float w_=aS*aS;float ph_=uPh+aArm*.785+aS*4.;vec2 d_=normalize(position.xz+1e-4);
-  transformed.xz+=d_*(.07*uCurl*sin(ph_)*w_-uSp*.35*w_+uSpread*.16*w_-uCurlIn*.3*w_);transformed.y+=.06*uCurl*cos(ph_)*w_+uCurlIn*.18*w_+uSpread*.05*w_;transformed.x-=uSp*.55*w_;transformed.z+=uTurn*.2*w_;`)};am.customProgramCacheKey=()=>'reefOcto2';
- const G=new T.Group(),mant=new T.Mesh(K.mt,mm),arms=new T.Mesh(K.ar,am);mant.rotation.z=.55;mant.position.set(-.02,.2,0);G.add(mant,arms);const em=new T.MeshLambertMaterial({map:K.et}),lm=mm;for(const z of[1,-1]){const e=new T.Mesh(K.eg,em);e.position.set(-.07,.075,.165*z);e.rotation.y=z>0?PI:0;mant.add(e);const lid=new T.Mesh(K.lg,lm);lid.position.copy(e.position);lid.rotation.set(z>0?-.5:.5,0,z*-.2);lid.scale.set(1,1,1);mant.add(lid)}
+ const mm=new T.MeshLambertMaterial({map:K.tx.map,normalMap:K.tx.normalMap}),am=new T.MeshLambertMaterial({map:K.tx.map,normalMap:K.tx.normalMap,side:T.DoubleSide}),
+  U={uPh:{value:0},uSp:{value:0},uTurn:{value:0},uSpread:{value:0},uCurl:{value:1},uCurlIn:{value:0},uJet:{value:0},uOpen:{value:0},uCrawl:{value:0},uCph:{value:0}};
+ // arms: rest pose -> jet bundle (arms trail straight behind, mantle first) -> crawl stepping; then the travelling curl waves
+ am.onBeforeCompile=sh=>{Object.assign(sh.uniforms,U);sh.vertexShader='uniform float uPh,uSp,uTurn,uSpread,uCurl,uCurlIn,uJet,uOpen,uCrawl,uCph;attribute float aArm,aS;\n'+sh.vertexShader.replace('#include <begin_vertex>',
+  `float w_=aS*aS;float an_=aArm*.785398+.392699;vec2 d_=vec2(cos(an_),sin(an_));float R0_=.1+aS*${AR.toFixed(3)};vec3 c0_=vec3(d_.x*R0_,-aS*.18+aS*aS*.1,d_.y*R0_);vec3 o_=position-c0_;
+  float j_=uJet*(.2+.8*smoothstep(0.,.3,aS));float rb_=(.045+.06*aS)*(1.+uOpen*2.2);vec3 c1_=vec3(-.03-aS*${(AR*.96).toFixed(3)},.03+rb_*d_.y,rb_*d_.x);
+  vec3 c_=mix(c0_,c1_,j_);float cw_=uCrawl*smoothstep(.15,.8,aS)*(1.-j_);float cp_=uCph+aArm*2.356;c_.x+=cw_*.14*sin(cp_);c_.y+=cw_*.08*max(0.,cos(cp_));
+  vec3 transformed=c_+o_*(1.-.3*j_);float k_=1.-.7*j_;float ph_=uPh+aArm*.785+aS*4.;
+  transformed.xz+=d_*k_*(.07*uCurl*sin(ph_)*w_-uSp*.35*w_+uSpread*.16*w_-uCurlIn*.3*w_);transformed.y+=k_*(.06*uCurl*cos(ph_)*w_+uCurlIn*.18*w_+uSpread*.05*w_);transformed.x-=k_*uSp*.55*w_;transformed.z+=uTurn*.2*w_;`)};am.customProgramCacheKey=()=>'reefOcto3';wetSkin(mm,WET.octopus);wetSkin(am,WET.octopus);
+ const G=new T.Group(),mant=new T.Mesh(K.mt,mm),arms=new T.Mesh(K.ar,am);mant.position.set(0,.07,0);G.add(mant,arms);const em=new T.MeshLambertMaterial({map:K.et}),lm=mm;
+ for(const z of[1,-1]){const e=new T.Mesh(K.eg,em);e.scale.setScalar(.8);e.position.set(.055,.03,.122*z);e.rotation.y=z>0?PI:0;mant.add(e);const lid=new T.Mesh(K.lg,lm);lid.position.copy(e.position);lid.scale.setScalar(.8);lid.rotation.set(z>0?-.5:.5,0,z*-.2);mant.add(lid)}
  const B=new T.Group();while(G.children.length)B.add(G.children[0]);G.add(B);
- const OB={trail:.5,spread:0,curl:1,curlIn:0,jet:0,tilt:.35,roll:0,rate:1,bob:0,breath:.3,bite:0,eat:0,tk:1};
- const OTG={cruise:{},glide:{trail:.8,curl:.2,rate:.4,tilt:.6},burst:{trail:1,curl:.4,rate:2.5,jet:1,tilt:.75},hover:{trail:0,spread:.4,rate:.7,bob:.5,tilt:.15},turn:{rate:1.2,tk:2.2},
-  brake:{trail:-.1,spread:1,curl:.3,rate:.6,tilt:.05},bite:{trail:0,curl:.4,bite:1,tilt:.2},startle:{trail:1,rate:3,jet:1,spread:-.3,tilt:.7},stunned:{trail:0,roll:.45,curl:.25,rate:.3,bob:.5,spread:.2,tilt:.1},
-  eat:{trail:0,curl:.3,eat:1,rate:.6,tilt:.15},idle:{trail:0,curl:.6,rate:.5,breath:1,spread:.15,bob:.3,tilt:.15}};
- const bl=blender(OTG,OB);let ph=0,lt=null,sp=0,tt=0;const tf=spring(6,.4);G.animate=(t,speed=0,turn=0,state)=>{const dt=lt==null?0:Math.min(DTMAX,Math.max(0,t-lt));lt=t;const{cur:c,ev}=bl(dt,state,turn);G.state=state||'cruise';
-  sp+=(clamp(speed,0,1)-sp)*ex(dt,4);tt+=(turn-tt)*ex(dt,5);ph+=dt*(1.5+sp*2)*c.rate+ev.n[0]*dt*.3;const bp=pulse(ev.clock/.9,.4),ep=pulse(ev.clock/1.8,.6),jp=Math.max(0,Math.sin(ph*1.3));
-  U.uPh.value=ph;U.uSp.value=c.trail*(.4+sp*.6)+c.jet*jp*.4;U.uTurn.value=tf.step(tt*c.tk,dt);U.uSpread.value=c.spread+c.jet*(1-jp)*.5-c.jet*jp*.3;U.uCurl.value=c.curl;U.uCurlIn.value=c.bite*bp+c.eat*(.4+.6*ep)+ev.cs*.6;
-  const br=1+Math.sin(ev.clock*1.6)*.04*(.3+c.breath)-c.jet*jp*.1;mant.scale.set(br,1+(br-1)*.5,br);mant.rotation.z=.55+c.tilt*.9+sp*.3*(1-Math.abs(c.spread))+ev.n[1]*.04;
-  B.rotation.x=c.roll*(.8+.35*Math.sin(ev.clock*1.3));B.position.set(c.bite*bp*.08,c.bob*Math.sin(ev.clock*1.5)*.06,0);G.userData.breath=br};G.states=STATES;return G}
+ // mrot = mantle angle about z (0 = apex forward/mantle-first as when jetting, ~2.1 = apex raised up-and-back as when crawling or resting)
+ const OB={trail:.5,spread:0,curl:1,curlIn:0,jet:0,mrot:2.1,crawl:0,autoJ:0,roll:0,rate:1,bob:0,breath:.3,bite:0,eat:0,tk:1};
+ const OTG={cruise:{crawl:1,autoJ:1,trail:.25},glide:{trail:.8,curl:.2,rate:.4,mrot:1.3,autoJ:1},burst:{trail:0,curl:.25,rate:1.6,jet:1,mrot:.12},hover:{trail:0,spread:.4,rate:.7,bob:.5,mrot:1.8},turn:{rate:1.2,tk:2.2,crawl:.6,autoJ:1},
+  brake:{trail:-.1,spread:1,curl:.3,rate:.6,mrot:1.9},bite:{trail:0,curl:.4,bite:1,mrot:2},startle:{trail:0,rate:2,jet:1,spread:-.3,mrot:.15},stunned:{trail:0,roll:.45,curl:.25,rate:.3,bob:.5,spread:.2,mrot:1.7},
+  eat:{trail:0,curl:.3,eat:1,rate:.6,mrot:2},idle:{trail:0,curl:.6,rate:.5,breath:1,spread:.15,bob:.3,mrot:2.1,crawl:.1}};
+ const bl=blender(OTG,OB);let ph=0,jph=0,cph=0,lt=null,sp=0,tt=0;const tf=spring(6,.4),mr=spring(5,.7);mr.x=OB.mrot;const MO={v:0,jet:0,crawl:0,jetPhase:0,contraction:0};G.motion=MO;mant.rotation.z=OB.mrot;
+ G.animate=(t,speed=0,turn=0,state)=>{const dt=lt==null?0:Math.min(DTMAX,Math.max(0,t-lt));lt=t;const{cur:c,ev}=bl(dt,state,turn);G.state=state||'cruise';
+  sp+=(clamp(speed,0,1.5)-sp)*ex(dt,4);tt+=(turn-tt)*ex(dt,5);
+  // gaits: slow = arm crawl/walk, fast = jet propulsion (mantle-first, arms trailing), with a fast contraction / slow refill cycle
+  const aj=sst(.75,1.15,sp)*c.autoJ,J=clamp(c.jet+aj,0,1),CR=c.crawl*(1-J)*sst(.02,.2,sp);
+  ph+=dt*(1.5+sp*2)*c.rate*(1-.6*J)+ev.n[0]*dt*.3;jph+=dt*(.7+.6*Math.min(sp,1.2))*(1+.3*c.jet);const jf=jph-Math.floor(jph),jc=jf<.35?sst(0,.35,jf):1-sst(.35,1,jf);cph+=dt*2*PI*(.4+.8*Math.min(sp,1));
+  const bp=pulse(ev.clock/.9,.4),ep=pulse(ev.clock/1.8,.6);
+  U.uPh.value=ph;U.uSp.value=c.trail*(.4+sp*.6)*(1-J);U.uTurn.value=tf.step(tt*c.tk,dt);U.uSpread.value=c.spread*(1-J);U.uCurl.value=c.curl*(1-.5*J);U.uCurlIn.value=c.bite*bp+c.eat*(.4+.6*ep)+ev.cs*.6;
+  U.uJet.value=J;U.uOpen.value=J*(1-jc)*.6;U.uCrawl.value=CR;U.uCph.value=cph;
+  const br=1+Math.sin(ev.clock*1.6)*.04*(.3+c.breath),jm=1-.16*J*jc+.05*J*(1-jc);mant.scale.set(1+(jm-1)*-.4,br*jm,br*jm);
+  mant.rotation.z=mr.step(c.mrot+(.15-c.mrot)*aj*(1-c.jet)+ev.n[1]*.04,dt);
+  B.rotation.x=c.roll*(.8+.35*Math.sin(ev.clock*1.3));B.position.set(c.bite*bp*.08+J*.05*(jc-.5),c.bob*Math.sin(ev.clock*1.5)*.06+CR*.015*Math.sin(2*cph),0);G.userData.breath=br;
+  MO.v=sp;MO.jet=J;MO.crawl=CR;MO.jetPhase=jf;MO.contraction=jc*J};G.states=STATES;return G}
 // ---------- assemble ----------
 let G0=null;
 if(kind==='turtle'){G0=buildTurtle()}else if(kind==='octopus'){G0=buildOcto()}
-const DETAIL=o3=>{const D=typeof ReefDetail!=='undefined'?ReefDetail:null;if(!D||opts.refine===false||q<2)return null;const r=D.upgrade(o3,{THREE,ratio:opts.detailRatio||(UL?3.6:3),lodDistance:opts.lodDistance});o3.trisBase=r.before;o3.lodDistance=r.lodDistance;return r};
+const DETAIL=o3=>{const D=typeof ReefDetail!=='undefined'?ReefDetail:null;if(!D||opts.refine===false||q<2)return null;if(q===2&&!UL)o3.traverse(m=>{const u=m.geometry&&m.geometry.userData;if(u&&u.finRefineW!=null)u.finRefineW=0});const r=D.upgrade(o3,{THREE,ratio:opts.detailRatio||(UL?(kind==='turtle'?3.5998:3.6):kind==='turtle'?2.999:3),lodDistance:opts.lodDistance});o3.trisBase=r.before;o3.lodDistance=r.lodDistance;return r};
 if(G0){G0.kind=kind;G0.length=1.1;G0.quality=QN;DETAIL(G0);G0.tris=tris(G0);if(opts.scale)G0.scale.setScalar(opts.scale);return G0}
 let key,def=D[kind],L,P,v=null;
 if(kind==='prey'||kind==='player'){v=kind==='player'?'clown':(PV[opts.variant]?opts.variant:'chromis');L=kind==='player'?1:.22;key=kind+'_'+v+'@'+QN;
- P=kind==='player'?{amp:.09,k:4.5,freq:5,base:.06,x0:L/2,L:L*1.05}:{amp:.13,k:4,freq:9,base:.06,x0:L/2,L:L*1.05}}
-else if(def){L=def.L;key=kind+'@'+QN;P={amp:def.amp,k:def.k,freq:def.freq,base:def.base,x0:L/2,L:L*1.05}}else throw new Error('buildCreature: unknown kind '+kind);
-if(!cache[key]){const g=GB();let tx;if(v){buildPrey(g,v,L,q);tx=preyTex(v)}else{def.build(g,q);SK=def.skin;tx=def.tex()}cache[key]={geo:g.geo(),tx}}
+ }
+else if(def){L=def.L;key=kind+'@'+QN}else throw new Error('buildCreature: unknown kind '+kind);
+const LO=LOCO[v||kind];P={amp:LO.ampT/(1.05*.93),k:2*PI*1.05/LO.lam,base:LO.base,envP:LO.envP,x0:L/2,L:L*1.05,wet:WET[v||kind],finFx:({shark:[0,.06,.92,1],eel:[.06,.2,.8,1],grouper:[.22,.2,.76,1]})[v||kind]};
+if(!cache[key]){const g=GB();g.FQ=FQ;let tx;if(v){buildPrey(g,v,L,q);tx=preyTex(v)}else{def.build(g,q);SK=def.skin;tx=def.tex()}cache[key]={geo:g.geo(),tx}}
 const geo=cache[key].geo,tx=cache[key].tx;
 const N=kind==='prey'?opts.count|0:0,fo=opts.finOpacity!=null?opts.finOpacity:.82,mat=bendMat(tx,P,N>0,0),mats=fo<1?[mat,bendMat(tx,P,N>0,fo,mat.userData.U)]:mat;let obj;
 if(N>0){const ig=geo.clone();const ph=new Float32Array(N);for(let i=0;i<N;i++)ph[i]=Math.random()*6.283;ig.setAttribute('aPhase',new T.InstancedBufferAttribute(ph,1));obj=new T.InstancedMesh(ig,mats,N)}
 else{obj=new T.Group();obj.add(new T.Mesh(geo,mats))}
-const U=mat.userData.U,bl=blender(FISH_TG,FISH_BASE);let ph=0,gph=0,sph=0,lt=null,ts=0,sp=.5;const finS=spring(10,.42),curlS=spring(8,.55),tailS=spring(7,.5);
+const U=mat.userData.U,bl=blender(FISH_TG,FISH_BASE),MO={mode:LO.mode,v:0,eff:0,hz:0,amp:0};let ph=0,gph=0,sph=0,lt=null,ts=0,vel=null,eff=.5;const finS=spring(10,.42),curlS=spring(8,.55),tailS=spring(7,.5);
+// swimming physics: inertia + drag velocity model -> effort -> Strouhal tail-beat frequency; travelling wave (head->tail) whose amplitude grows toward the tail
 obj.animate=(t,speed=.5,turn=0,state)=>{const dt=lt==null?0:Math.min(DTMAX,Math.max(0,t-lt));lt=t;const{cur:c,ev}=bl(dt,state,turn);obj.state=state||'cruise';
- sp+=(speed-sp)*ex(dt,4);ph+=dt*P.freq*(.35+sp)*c.fm*(1+ev.n[0]*.06);gph+=dt*(2.2+c.gill*2);sph+=dt*7;ts+=(clamp(turn,-1,1)-ts)*ex(dt,6);
+ const tg=clamp(+speed||0,0,1.5);if(vel==null)vel=tg;for(let r=dt;r>1e-6;r-=1/120){const h=Math.min(r,1/120);vel=Math.max(0,vel+(LO.kd*(tg*tg-vel*vel)+.8*(tg-vel))*h)}
+ eff+=(clamp(vel+1.2*(tg-vel),0,1.8)-eff)*ex(dt,6);
+ const hz=LO.St*LO.Ubl*(.15+eff)/(2*LO.ampT);ph+=dt*2*PI*hz*c.fm*(1+ev.n[0]*.06);gph+=dt*(2.2+c.gill*2);sph+=dt*2*PI*LO.fp*(.5+.8*Math.min(eff,1.2));ts+=(clamp(turn,-1,1)-ts)*ex(dt,6);
  const bp=pulse(ev.clock/.65,.3),eg=pulse(ev.clock/1.5,.55),tsg=ev.tsg;
- U.uPh.value=ph;U.uAmp.value=P.amp*(.55+.6*Math.min(sp,1.5))*c.amp;U.uTurn.value=tailS.step(ts*(1+c.turnK*.8),dt)+ev.n[1]*.05;
+ // amplitude rises with speed then plateaus; labriform swimmers row with the pectorals when slow and recruit the tail only when fast
+ const pec=LO.labr*(1-sst(.7,1.25,eff))*(.35+.9*Math.min(eff,1));
+ U.uPh.value=ph;U.uAmp.value=P.amp*(.5+.5*sst(0,.8,eff))*(1-LO.labr*.85*(1-sst(.5,1.1,eff)))*c.amp;U.uTurn.value=tailS.step(ts*(1+c.turnK*.8),dt)+ev.n[1]*.05;
  U.uCurl.value=curlS.step(c.curl*tsg*(1-ev.stun+ev.stun*Math.sin(ev.clock*.9))+ev.cs*ev.sgn*2.4,dt);
  U.uLunge.value=c.lunge+c.bite*bp+c.eat*eg*.4-ev.cs*.3;U.uJaw.value=c.jaw+c.mouth*(.5+.5*Math.sin(gph))*.35+c.bite*bp+c.eat*Math.min(1,eg*1.5);
- U.uGill.value=c.gill;U.uGillPh.value=gph;U.uScull.value=c.scull;U.uScullPh.value=sph;U.uFlare.value=c.flare;U.uFin.value=finS.step(c.fin+ev.cs*.8+ev.n[2]*.08,dt);
- U.uRoll.value=c.roll*(.8+.35*Math.sin(ev.clock*1.3))-ts*.12+ev.n[2]*.02;U.uBob.value=c.bob*Math.sin(ev.clock*1.7)*P.L*.04;U.uSwell.value=c.eat*eg*.08};
-obj.kind=kind;obj.variant=v;obj.length=L;obj.quality=QN;obj.states=STATES;obj.tris=(geo.index.count/3);if(DETAIL(obj))obj.tris=tris(obj);if(opts.scale)obj.scale.setScalar(opts.scale);return obj}
+ U.uGill.value=c.gill;U.uGillPh.value=gph;U.uScull.value=c.scull+pec;U.uScullPh.value=sph;U.uScAs.value=sst(0,.6,c.scull)*(1-sst(.2,.7,eff));U.uFlare.value=c.flare;U.uFin.value=finS.step(c.fin+ev.cs*.8+ev.n[2]*.08,dt);
+ U.uRoll.value=c.roll*(.8+.35*Math.sin(ev.clock*1.3))-ts*LO.bank*(.35+.65*Math.min(1,vel))+ev.n[2]*.02;U.uBob.value=c.bob*Math.sin(ev.clock*1.7)*P.L*.04;U.uSwell.value=c.eat*eg*.08;
+ MO.v=vel;MO.eff=eff;MO.hz=hz*c.fm;MO.amp=U.uAmp.value*P.L};
+
+obj.loco=LO;obj.motion=MO;obj.kind=kind;obj.variant=v;obj.length=L;obj.quality=QN;obj.states=STATES;obj.tris=(geo.index.count/3);if(DETAIL(obj))obj.tris=tris(obj);if(opts.scale)obj.scale.setScalar(opts.scale);return obj}
 
 // npcs.js: hand-built character models for the reef adventure's friendly NPCs, with faces and a blended idle/talk/greet animator.
 // API: ReefNPCs.buildNPC(THREE, id, opts) -> THREE.Group model with
@@ -3865,43 +4122,59 @@ function canvasTex(T,w,h,draw,disp){const c=document.createElement('canvas');c.w
 
 // ---------------------------------------------------------------- shrimp
 function DET(T,root,o){if(o.quality==='low'||o.quality==='medium'||o.detail===false||typeof ReefDetail==='undefined')return;ReefDetail.upgrade(root,{THREE:T,minTris:8,ratio:o.detailRatio||ReefDetail.ratioFor(o.quality),disp:o.disp})}
+// thick tail-fan blade (uropod / telson): closed lens-section loft, thick rounded base + midrib thinning to a fine edge and tip.
+// ring = RN points around the section (edge, upper..., edge, lower...), SN stations along the blade, pinched tip. Local frame like the old
+// plane: blade runs along -x, width along y, thickness along z. Outward winding (verified by a signed-volume check) -> single-sided material.
+function fanBlade(T,telson,hi){const RN=hi?6:4,SN=2,L=telson?.34:.3,W=telson?.062:.07,T0=telson?.026:.022,pos=[],idx=[];
+ const half=s=>telson?W*(1-.72*s)*(1+.25*Math.sin(Math.PI*Math.min(1,s*1.4))):W*Math.sqrt(Math.max(0,1-Math.pow(Math.max(0,s-.5)/.5,2.2)))*(.55+.45*Math.min(1,s*3)),
+  th=s=>T0*Math.pow(1-.82*s,1.1)*(1+.5*Math.exp(-s*s*9));
+ for(let i=0;i<SN;i++){const s=i/SN*.93,w=half(s),t=th(s);for(let j=0;j<RN;j++){const a=j/RN*2*Math.PI,c=Math.cos(a),z=Math.sin(a);pos.push(-s*L,c*w,Math.abs(z)<1e-6?0:Math.sign(z)*t*Math.pow(Math.abs(z),.8)*(1+.25*(1-Math.abs(c))))}}
+ pos.push(-L,0,0);const tip=SN*RN;
+ for(let i=0;i<SN-1;i++)for(let j=0;j<RN;j++){const a=i*RN+j,b=i*RN+(j+1)%RN,c=a+RN,d=b+RN;idx.push(a,b,c,b,d,c)}
+ for(let j=0;j<RN;j++)idx.push((SN-1)*RN+j,(SN-1)*RN+(j+1)%RN,tip);
+ const g=new T.BufferGeometry();g.setAttribute('position',new T.Float32BufferAttribute(pos,3));
+ // outward winding: signed volume of the (open-at-root) shell about its centroid must be positive
+ let v=0;for(let f=0;f<idx.length;f+=3){const A=idx[f]*3,B=idx[f+1]*3,C=idx[f+2]*3;v+=pos[A]*(pos[B+1]*pos[C+2]-pos[B+2]*pos[C+1])-pos[A+1]*(pos[B]*pos[C+2]-pos[B+2]*pos[C])+pos[A+2]*(pos[B]*pos[C+1]-pos[B+1]*pos[C])}
+ if(v<0)for(let f=0;f<idx.length;f+=3){const t=idx[f+1];idx[f+1]=idx[f+2];idx[f+2]=t}
+ g.setIndex(idx);g.computeVertexNormals();g.computeBoundingSphere();return g}
 function buildShrimp(T,o){o=Object.assign({color:0xff7a4a,stripe:0xffe0c8,quality:'high',length:1.6,seed:1},o||{});const disp=o.disp||[];const K=kit(T,disp),hi=o.quality!=='low';
  const root=new T.Group();root.name='shrimp';const body=K.grp(null,root);
  const mBody=K.phong({color:o.color,emissive:new T.Color(o.color).multiplyScalar(.18),shininess:60,specular:0x664433}),mStripe=K.phong({color:o.stripe,emissive:0x221810,shininess:50}),
-  mLeg=K.lam({color:new T.Color(o.color).lerp(new T.Color(0xffffff),.25),emissive:0x2a1208}),mEye=K.phong({color:0x0a0a10,shininess:120,specular:0xffffff}),mFan=K.lam({color:o.color,emissive:0x301008,transparent:true,opacity:.92,side:T.DoubleSide});
- const sph=K.g('s',()=>K.lod(new T.SphereGeometry(1,hi?12:8,hi?8:6),new T.SphereGeometry(1,6,4),.08)),cyl=K.g('c',()=>new T.CylinderGeometry(1,1,1,hi?5:4,1,true)),cone=K.g('k',()=>new T.ConeGeometry(1,1,hi?8:5));
+  mLeg=K.lam({color:new T.Color(o.color).lerp(new T.Color(0xffffff),.25),emissive:0x2a1208}),mEye=K.phong({color:0x0a0a10,shininess:120,specular:0xffffff}),mFan=K.lam({color:o.color,emissive:0x301008,transparent:true,opacity:.92,side:T.FrontSide});
+ const sph=K.g('s',()=>K.lod(new T.SphereGeometry(1,hi?11:7,hi?8:6),new T.SphereGeometry(1,6,4),.08)),cyl=K.g('c',()=>new T.CylinderGeometry(1,1,1,hi?5:4,1,true)),cone=K.g('k',()=>new T.ConeGeometry(1,1,hi?8:5));
  // carapace + rostrum
- const head=K.mesh(sph,mBody,[.32,0,0],[.42,.25,.24],null,body);K.mesh(cone,mBody,[.8,.06,0],[.05,.42,.05],[0,0,-PI/2+.15],body);
- K.mesh(sph,mStripe,[.32,.09,0],[.36,.16,.2],null,body);
+ const head=K.mesh(sph,mBody,[.35,.01,0],[.47,.27,.165],null,body);K.mesh(cone,mBody,[.88,.1,0],[.032,.5,.022],[0,0,-PI/2+.2],body);
+ K.mesh(sph,mStripe,[.33,.13,0],[.38,.13,.135],null,body);
  // eyes on stalks
- const eyes=[];for(const s of[-1,1]){const st=K.grp([.62,.12,s*.12],body);K.mesh(cyl,mLeg,[0,.03,0],[.025,.08,.025],[s*.5,0,0],st);eyes.push(K.mesh(sph,mEye,[.01,.08,s*.03],.055,null,st))}
+ const eyes=[];for(const s of[-1,1]){const st=K.grp([.66,.12,s*.1],body);K.mesh(cyl,mLeg,[0,.03,0],[.025,.08,.025],[s*.5,0,0],st);eyes.push(K.mesh(sph,mEye,[.01,.08,s*.03],.055,null,st))}
  // abdomen: chain of segments that curl
  const segs=[];let par=body,px=0;const NS=hi?6:5;for(let i=0;i<NS;i++){const k=1-i/NS,s=K.grp([i?-.2*(1-.05*i):0,i?-.012:0,0],par);if(!i)s.position.set(.02,0,0);
-  const r=.2*k+.06;K.mesh(sph,i%2?mStripe:mBody,[-.1,0,0],[.15,r,r*.95],null,s);segs.push(s);par=s}
+  const r=.15*k+.1;K.mesh(sph,i%2?mStripe:mBody,[-.1,0,0],[.16,r*1.08,r*.62],null,s);segs.push(s);par=s}
  // tail fan
- const fanG=K.g('fan',()=>{const g=new T.PlaneGeometry(.34,.13,2,1);g.translate(-.17,0,0);return g});const fan=K.grp([-.22,0,0],par);
- [-.5,0,.5].forEach(a=>{const f=K.mesh(fanG,mFan,null,null,[PI/2,0,a],fan)});
+ const fanG=K.g('fanU',()=>fanBlade(T,false,hi)),telG=K.g('fanT',()=>fanBlade(T,true,hi));const fan=K.grp([-.22,0,0],par);
+ [-.72,-.36,0,.36,.72].forEach(a=>{const f=K.mesh(a?fanG:telG,mFan,null,a?[1,1,1]:[1.15,1,1],[PI/2,0,a],fan)});
  // swimming legs (pleopods), metachronal wave
- const swim=[];segs.slice(0,Math.min(5,NS-1)).forEach((s,i)=>{for(const sd of[-1,1]){const p=K.grp([-.1,-.12+.02*i,sd*.08],s);const l=K.mesh(cyl,mLeg,[0,-.08,0],[.018,.18,.035],null,p);p.rotation.x=sd*.18;swim.push({p,i,sd})}});
+ const swim=[];segs.slice(0,Math.min(5,NS-1)).forEach((s,i)=>{for(const sd of[-1,1]){const p=K.grp([-.1,-.12+.02*i,sd*.08],s);const l=K.mesh(cyl,mLeg,[0,-.08,0],[.014,.18,.03],null,p);p.rotation.x=sd*.18;swim.push({p,i,sd})}});
  // walking legs
- const walk=[];for(let i=0;i<(hi?3:2);i++)for(const sd of[-1,1]){const p=K.grp([.42-i*.12,-.15,sd*.1],body);K.mesh(cyl,mLeg,[0,-.12,0],[.012,.24,.012],null,p);p.rotation.x=sd*.35;walk.push({p,i,sd})}
+ const walk=[];for(let i=0;i<(hi?3:2);i++)for(const sd of[-1,1]){const p=K.grp([.46-i*.12,-.12,sd*.07],body);K.mesh(cyl,mLeg,[0,-.17,0],[.009,.34,.009],null,p);p.rotation.x=sd*.35;walk.push({p,i,sd})}
  // antennae: jointed chains
- const ants=[];const AJ=hi?9:5;for(const sd of[-1,1])for(const long of[1,0]){let pp=K.grp([.7,.1,sd*.05],body);const base=pp;pp.rotation.set(sd*(long?.25:.6),0,long?.35:.6);const ch=[];
-  const len=long?(hi?.19:.32):.09,n=long?AJ:3;for(let j=0;j<n;j++){const jn=K.grp(j?[0,len,0]:null,pp);K.mesh(cyl,mLeg,[0,len/2,0],[.009*(1-j/n)+.004,len,.009*(1-j/n)+.004],null,jn);jn.rotation.z=j?-.13:-.9;ch.push(jn);pp=jn}
+ const ants=[];const AJ=hi?8:4;for(const sd of[-1,1])for(const long of[1,0]){let pp=K.grp([.7,.1,sd*.05],body);const base=pp;pp.rotation.set(sd*(long?.25:.6),0,long?.12:.6);const ch=[];
+  const len=long?(hi?.34:.68):.11,n=long?AJ:3;for(let j=0;j<n;j++){const jn=K.grp(j?[0,len,0]:null,pp);K.mesh(cyl,mLeg,[0,len/2,0],[.009*(1-j/n)+.004,len,.009*(1-j/n)+.004],null,jn);jn.rotation.z=j?-.13:-.9;ch.push(jn);pp=jn}
   ants.push({ch,sd,long,base})}
  root.scale.setScalar(o.length/1.6);
  let t0=(o.seed*1.37)%TAU,blink=0;
  // phases are integrated (ph += dt*freq) so a speed change never jumps the stroke; speed itself is exp-smoothed;
  // antennae and tail fan trail the body bob through damped springs (follow-through), plus slow noise so the idle isn't metronomic
- const ph={swim:t0,walk:t0,seg:t0,ant:t0,antS:t0,bob:t0},spS=ftSpring(6,.5),fanS=ftSpring(9,.4),nzA=[Math.random()*TAU,Math.random()*TAU];let sp=null,flick=0;
+ const ph={swim:t0,walk:t0,seg:t0,ant:t0,antS:t0,bob:t0},spS=ftSpring(6,.5),fanS=ftSpring(9,.4),nzA=[Math.random()*TAU,Math.random()*TAU];let sp=null,flick=0,flT=9;const motion={v:0,flip:0,hz:0};function tailFlip(){flT=0};const sst=(a,b,x)=>{x=clamp((x-a)/(b-a),0,1);return x*x*(3-2*x)}
  function update(dt,t,spd){dt=clamp(dt||0,0,DTM);spd=spd==null?1:spd;if(sp==null)sp=spd;sp+=(spd-sp)*ex(dt,4);const f=6+8*sp;
   ph.swim+=dt*f;ph.walk+=dt*4;ph.seg+=dt*2.2;ph.ant+=dt*2.4;ph.antS+=dt*5;ph.bob+=dt*2.5;nzA[0]+=dt*.31;nzA[1]+=dt*.53;const nz=Math.sin(nzA[0])*Math.sin(nzA[1]*1.7);
-  swim.forEach(s=>{s.p.rotation.z=.5+Math.sin(ph.swim-s.i*.9)*(.35+.4*sp)});walk.forEach(w=>{w.p.rotation.z=.2+Math.sin(ph.walk+w.i*1.3)*.15});
+  flT+=dt;const fl=flT<.07?sst(0,.07,flT):1-sst(.07,.4,flT);motion.flip=fl;motion.v=sp;motion.hz=f/TAU;
+  swim.forEach(s=>{s.p.rotation.z=.5+Math.sin(ph.swim+s.i*.9)*(.35+.4*sp)*(1-fl)+fl*.9});walk.forEach(w=>{w.p.rotation.z=.2+Math.sin(ph.walk+w.i*1.3)*.15});
   const bobY=Math.sin(ph.bob)*.03,bobV=Math.cos(ph.bob)*.03*2.5;const lagA=spS.step(-bobV*1.6-sp*.03,dt);
-  segs.forEach((s,i)=>{s.rotation.z=(i?.06:0)+Math.sin(ph.seg-i*.6)*.05*(1+sp)+(i?Math.max(0,Math.sin(ph.seg*.41))*.05:0)});fan.rotation.z=Math.sin(ph.seg*1.36)*.12+fanS.step(-bobV*2,dt);
+  segs.forEach((s,i)=>{s.rotation.z=(i?[0,-.12,.36,.16,.1,.08][i]:0)+Math.sin(ph.seg-i*.6)*.05*(1+sp)*(1-fl)+(i?Math.max(0,Math.sin(ph.seg*.41))*.05:0)+(i?fl*.48:0)});fan.rotation.z=Math.sin(ph.seg*1.36)*.12+fanS.step(-bobV*2,dt)+fl*.5;
   ants.forEach(a=>a.ch.forEach((j,k)=>{if(k)j.rotation.z=-.13+Math.sin((a.long?ph.ant:ph.antS)-k*.55+a.sd)*(a.long?.13:.2)+lagA*(k/a.ch.length)*(a.long?1:.5)+nz*.04;j.rotation.x=Math.sin(ph.seg*.77+k*.4+a.sd*2)*.06}));
-  body.position.y=bobY;body.rotation.z=Math.sin(ph.seg*.59)*.03+nz*.01}
- DET(T,root,o);root.userData.update=update;return{object:root,update,legs:swim.length+walk.length,antennae:ants.length,segments:segs.length}}
+  body.position.y=bobY;body.rotation.z=Math.sin(ph.seg*.59)*.03+nz*.01-fl*.25}
+ DET(T,root,o);root.userData.update=update;root.userData.tailFlip=tailFlip;root.userData.motion=motion;return{object:root,update,tailFlip,motion,legs:swim.length+walk.length,antennae:ants.length,segments:segs.length}}
 // ---------------------------------------------------------------- sea-monkey bellhop (seated driver). Faces +x.
 function buildBellhop(T,o){if(o&&o.npcModel&&typeof window!=='undefined'&&window.ReefNPCs)return window.ReefNPCs.bellhopCompat(T,o);o=Object.assign({quality:'high',skin:0xffb8a0,jacket:0xd8262e,gold:0xffc63a,seated:true},o||{});const disp=o.disp||[];const K=kit(T,disp),hi=o.quality!=='low',sg=hi?16:10;
  const root=new T.Group();root.name='bellhop';
