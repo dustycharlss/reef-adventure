@@ -7,6 +7,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:#021827;font-family:sy
 #c{position:fixed;inset:0;width:100%;height:100%;display:block}
 .hidden{display:none!important}
 #vig{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,transparent 55%,rgba(0,10,20,.55) 100%);transition:background .4s}
+#bvig{position:fixed;inset:0;pointer-events:none;opacity:0;background:radial-gradient(ellipse at center,transparent 38%,rgba(0,12,28,.62) 78%,rgba(0,8,20,.9) 100%)}
 #vig.danger{background:radial-gradient(ellipse at center,transparent 45%,rgba(120,0,0,.45) 100%)}
 #hurt{position:fixed;inset:0;pointer-events:none;background:rgba(255,40,40,.35);opacity:0;transition:opacity .25s}
 #hud{position:fixed;inset:0;pointer-events:none}
@@ -88,7 +89,7 @@ body.dual #up,body.dual #dn{display:none!important}body.dual #recal{display:none
 #excl{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);font-size:40px;color:#ff4a4a;font-weight:900;text-shadow:0 0 12px #000;opacity:0;transition:opacity .2s}
 .small{font-size:12px;opacity:.7;max-width:420px;margin-top:10px}
 </style></head><body>
-<canvas id="c"></canvas><div id="vig"></div><div id="hurt"></div>
+<canvas id="c"></canvas><div id="vig"></div><div id="bvig"></div><div id="hurt"></div>
 <div id="hud" class="hidden">
  <div id="bars"><div class="bar" id="hpb"><i></i></div><div class="bar" id="stb"><i></i></div><div id="stats"></div></div>
  <div id="compass"></div><div id="obj"></div><div id="zone"></div><div id="toast"></div><div id="excl">!</div><div id="prompt"></div><div id="hint"></div>
@@ -113,7 +114,7 @@ body.dual #up,body.dual #dn{display:none!important}body.dual #recal{display:none
 <div class="row">Invert right stick X<input type="checkbox" id="sinvRX"></div>
 <div class="row">Invert right stick Y<input type="checkbox" id="sinvRY"></div>
  <div class="row">Look sensitivity <small>(default 0.55)</small><input type="range" id="ssens" min="0.3" max="2.5" step="0.1"></div>
- <div class="row">Camera turn speed<input type="range" id="scamt" min="0.3" max="1.5" step="0.1"></div><div class="row">Reduced motion<input type="checkbox" id="srm"></div><div class="row">Stick forward zone<input type="range" id="sdz" min="0.3" max="0.9" step="0.05"></div><div class="row">Buddy name<input type="text" id="snug" maxlength="16" style="width:120px"></div><div class="row">Buddy auto-attack<input type="checkbox" id="snatk"></div><div class="row">Camera sway<input type="range" id="ssway" min="0" max="1.6" step="0.1"></div>
+ <div class="row">Camera turn speed<input type="range" id="scamt" min="0.3" max="1.5" step="0.1"></div><div class="row">Reduce motion (less shake, zoom and flashes)<input type="checkbox" id="srm"></div><div class="row">Stick forward zone<input type="range" id="sdz" min="0.3" max="0.9" step="0.05"></div><div class="row">Buddy name<input type="text" id="snug" maxlength="16" style="width:120px"></div><div class="row">Buddy auto-attack<input type="checkbox" id="snatk"></div><div class="row">Camera sway<input type="range" id="ssway" min="0" max="1.6" step="0.1"></div>
  <div class="row">Depth of field (blur far)<input type="checkbox" id="sdof"></div>
  <div class="row">Minimap north-up<input type="checkbox" id="smini"></div>
  <div class="row">Show FPS<input type="checkbox" id="sfps"></div>
@@ -5846,7 +5847,7 @@ function zoneAt(x,y,z){if(LV&&LV.contains(x,z))return ZM[LVid];const dc=Math.hyp
  let b=null,bd=1e9;for(let i=0;i<4;i++){const Z=ZONES[i],d=Math.hypot(x-Z.x,z-Z.z)/Z.r;if(d<bd){bd=d;b=Z}}return b}
 // ---------- settings & save ----------
 const DEFS={q:'auto',snd:true,sens:.55,tilt:false,fps:false,dof:null,miniNorth:false,nugName:'Nugget',nugAtk:true,dz:.8,camTurn:1,rm:false,cruise:true,invLX:false,invLY:false,invRX:false,invRY:false};const NN=()=>(S.nugName||'Nugget').slice(0,16);
-let S=Object.assign({},DEFS);try{const _sr=JSON.parse(localStorage.getItem('reefQuestSettings')||'{}');const _hadC=_sr&&Object.prototype.hasOwnProperty.call(_sr,'cruise');Object.assign(S,_sr);if(_sr&&Object.keys(_sr).length&&!_hadC)S.cruise=true}catch(e){}if(!S.ctlv2){S.ctl='dual';S.ctlv2=1}if(!S.dzv2){S.dz=.8;S.dzv2=1}/* left stick: inner 80% = swim forward, rim = steer */
+let S=Object.assign({},DEFS);try{const _sr=JSON.parse(localStorage.getItem('reefQuestSettings')||'{}');const _hadC=_sr&&Object.prototype.hasOwnProperty.call(_sr,'cruise');Object.assign(S,_sr);if(_sr&&Object.keys(_sr).length&&!_hadC)S.cruise=true;if(!Object.prototype.hasOwnProperty.call(_sr,'rm')){try{S.rm=!!(window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches)}catch(e2){}}}catch(e){}if(!S.ctlv2){S.ctl='dual';S.ctlv2=1}if(!S.dzv2){S.dz=.8;S.dzv2=1}/* left stick: inner 80% = swim forward, rim = steer */
 const saveS=()=>{try{localStorage.setItem('reefQuestSettings',JSON.stringify(S))}catch(e){}};
 const NEWG=()=>({inv:{},recipes:{potion:1},crafted:{},perk:{armor:0,magnet:0,collect:0,stun:0,lift:0},stage:0,got:{},pearls:0,shells:0,secrets:0,plank:0,upg:{spd:0,hp:0,boost:0},cp:0,skin:'clown',unlocked:{clown:1},time:0,playTime:0,done:false,lvlP:0,lantern:false,size:1,eaten:0,col:{star:0,glass:0,coin:0,rare:0}});
 let G=NEWG();let hasSave=false;
@@ -6403,7 +6404,7 @@ function doFlip(){if(PL.flipCd>0||dlg)return;PL.flipT=.75;PL.flipK=(PL.flipK+1)%
 let toastT=0,zoneT=0,curZone=null,state='title',now=0;
 let hintT=0;function hint(k,txt){S.hints=S.hints||{};if(S.hints[k]||hintT>0||dlg)return;S.hints[k]=1;saveS();const h=$('hint');h.textContent=txt;h.style.opacity=.95;hintT=6}
 function toast(s){$('toast').textContent=s;$('toast').style.opacity=1;toastT=2.4}
-function hurt(dmg,from,sting){if(PL.hurtT>0||PL.iframeT>0)return;if(G.perk&&G.perk.armor)dmg*=1-.15*G.perk.armor;PL.hp-=dmg;PL.hurtT=1;PL.regenT=0;$('hurt').style.opacity=1;setTimeout(()=>$('hurt').style.opacity=0,180);sfx('hurt');if(navigator.vibrate)try{navigator.vibrate(60)}catch(e){}
+function hurt(dmg,from,sting){if(PL.hurtT>0||PL.iframeT>0)return;if(G.perk&&G.perk.armor)dmg*=1-.15*G.perk.armor;PL.hp-=dmg;PL.hurtT=1;PL.regenT=0;$('hurt').style.opacity=S.rm?.35:1;setTimeout(()=>$('hurt').style.opacity=0,S.rm?260:180);sfx('hurt');if(navigator.vibrate)try{navigator.vibrate(60)}catch(e){}
  if(from){V1.subVectors(PL.p,from).setY(0).setLength(sting?3:8);PL.v.add(V1)}if(PL.hp<=0)die()}
 function die(){gameOver()}
 function respawn(){const c=CPS[G.cp];PL.p.copy(c.p);PL.v.set(0,0,0);PL.hurtT=1.5;preds.forEach(p=>{p.state='patrol';p.cool=6});const n=G.cp<CPS.length-1?CPS[G.cp+1].p:c.p;PL.yaw=Math.atan2(n.x-c.p.x,n.z-c.p.z);camInit=true}
@@ -6432,10 +6433,10 @@ function updCam(dt){if(cam.userData.fov0==null)cam.userData.fov0=cam.fov;PL.fovK
  const tt=U.uT.value,lat=clamp(PL.yawRate,-3.5,3.5)*SW*.55*(.6+G.size*.4);V1.set(tx+Math.cos(camYawLag)*lat,ty+Math.sin(tt*.9)*.18*SW+Math.sin(tt*.37)*.12*SW,tz-Math.sin(camYawLag)*lat);const fl=height(V1.x,V1.z)+1;if(V1.y<fl)V1.y=fl;if(V1.y>-.4)V1.y=-.4;
  if(camInit){camPos.copy(V1);camLook.copy(PL.p);camInit=false;camYawLag=lookYaw}
  // critically damped spring
- const k=PL.uturnT>0?1:1-Math.exp(-dt*(PL.boostT>0?6:4.2)/(1+SW*.45));camPos.lerp(V1,k);for(const c of colliders){if(c.off||c.thin)continue;const dx=camPos.x-c.x,dy=camPos.y-c.y,dz=camPos.z-c.z,d2=dx*dx+dy*dy+dz*dz,m=c.r+.9;if(d2<m*m){const d=Math.sqrt(d2)||1;camPos.x=c.x+dx/d*m;camPos.y=c.y+dy/d*m;camPos.z=c.z+dz/d*m}}{const cf=height(camPos.x,camPos.z)+.8;if(camPos.y<cf)camPos.y=cf}
+ const k=PL.uturnT>0?1:1-Math.exp(-dt*(PL.boostT>0&&!S.rm?6:4.2)/(1+SW*.45));camPos.lerp(V1,k);for(const c of colliders){if(c.off||c.thin)continue;const dx=camPos.x-c.x,dy=camPos.y-c.y,dz=camPos.z-c.z,d2=dx*dx+dy*dy+dz*dz,m=c.r+.9;if(d2<m*m){const d=Math.sqrt(d2)||1;camPos.x=c.x+dx/d*m;camPos.y=c.y+dy/d*m;camPos.z=c.z+dz/d*m}}{const cf=height(camPos.x,camPos.z)+.8;if(camPos.y<cf)camPos.y=cf}
  if(ENG){V2.copy(PL.p).lerp(ENG.P.p,.4)}else V2.set(Math.sin(PL.yaw),0,Math.cos(PL.yaw)).multiplyScalar(2).add(PL.p);camLook.lerp(V2,1-Math.exp(-dt*(ENG?3:7)));
- cam.position.copy(camPos);cam.lookAt(camLook);camRoll=lerp(camRoll,clamp(-PL.yawRate*.05*(1+SW*1.3),-.32,.32)+Math.sin(U.uT.value*.6)*.012*SW,1-Math.exp(-dt*2.2));cam.rotateZ(camRoll);
- const fov=(innerWidth<innerHeight?72:60)+(PL.boostT>0?8:0);cam.fov=lerp(cam.fov,fov,1-Math.exp(-dt*4));cam.updateProjectionMatrix()}
+ cam.position.copy(camPos);cam.lookAt(camLook);camRoll=lerp(camRoll,(clamp(-PL.yawRate*.05*(1+SW*1.3),-.32,.32)+Math.sin(U.uT.value*.6)*.012*SW)*(S.rm?.4:1),1-Math.exp(-dt*2.2));cam.rotateZ(camRoll);
+ const fov=(innerWidth<innerHeight?72:60)+(PL.boostT>0?(S.rm?1.5:8):0);cam.fov=lerp(cam.fov,fov,1-Math.exp(-dt*4));cam.updateProjectionMatrix()}
 // ---------- player update ----------
 function collide(p,r){for(const c of colliders){if(c.off)continue;const dx=p.x-c.x,dz=p.z-c.z;if(c.thin){if(p.y>c.y+c.thin*.5||p.y<c.y-c.thin*.5)continue;const d=Math.hypot(dx,dz),m=c.r+r;if(d<m&&d>1e-4){p.x=c.x+dx/d*m;p.z=c.z+dz/d*m}continue}
   const dy=p.y-c.y,d2=dx*dx+dy*dy+dz*dz,m=c.r+r;if(d2<m*m){const d=Math.sqrt(d2)||1;p.x=c.x+dx/d*m;p.y=c.y+dy/d*m;p.z=c.z+dz/d*m}}
@@ -6505,7 +6506,7 @@ function updEnv(dt,t){const z=zoneAt(PL.p.x,PL.p.y,PL.p.z);if(z!==curZone){curZo
  bio.material.opacity=.6+Math.sin(t*1.3)*.3;bio.visible=PL.p.z<-90;
  // snow follows camera with wrap
  snow.position.set(Math.floor(cam.position.x/60)*60,Math.floor(cam.position.y/60)*60,Math.floor(cam.position.z/60)*60);
- const lm=lines.userData.m;lm.opacity=lerp(lm.opacity,PL.boostT>0?.35:0,dt*6);lines.visible=lm.opacity>.01;if(lines.visible){lines.position.copy(PL.p);lines.quaternion.copy(plG.quaternion);lines.children.forEach(c=>{c.position.z-=dt*PL.spd*1.5;if(c.position.z<-8)c.position.z+=10})}}
+ const lm=lines.userData.m;lm.opacity=lerp(lm.opacity,PL.boostT>0?(S.rm?.08:.35):0,dt*6);lines.visible=lm.opacity>.01;{const bv=$('bvig');if(bv){const tg=PL.boostT>0?(S.rm?1:.7):0;bv._o=lerp(bv._o||0,tg,1-Math.exp(-dt*(tg?8:4)));bv.style.opacity=bv._o<.01?0:bv._o.toFixed(3)}}if(lines.visible){lines.position.copy(PL.p);lines.quaternion.copy(plG.quaternion);lines.children.forEach(c=>{c.position.z-=dt*PL.spd*1.5;if(c.position.z<-8)c.position.z+=10})}}
 // ---------- HUD ----------
 function updHUD(dt){const yaw=camYawLag;$('hpb').firstChild.style.width=(PL.hp/maxHp()*100)+'%';
  const bp=PL.boostT>0?PL.boostT/boostDur():1-Math.max(0,PL.boostCd)/boostCdMax();$('stb').firstChild.style.width=(bp*100)+'%';
@@ -7469,6 +7470,31 @@ if(TESTMENU){
  tstBadge();
 }
 
+// ---------- g15: save progress inside levels (position snapshot + level quest steps) ----------
+// G.pos = {x,y,z,yaw,zone,q:{questId:[step,done]},t}. Snapshots only while playing; cleared on game over and ending.
+let _posT=0;
+function posSnap(){try{if(state!=='play'||!PL||PL.hp<=0||(FT&&FT.busy)||(typeof ENG!=='undefined'&&ENG)||dlg)return;
+ const p=PL.p;if(!isFinite(p.x+p.y+p.z))return;const o={x:+p.x.toFixed(2),y:+p.y.toFixed(2),z:+p.z.toFixed(2),yaw:+PL.yaw.toFixed(3),zone:LV&&LVid?LVid:null,t:Date.now()};
+ if(LV&&LVid&&LV.quests){o.q={};for(const q of LV.quests)o.q[q.id]=[q.step|0,q.done?1:0]}
+ else if(G.pos&&G.pos.zone&&!LV){/* just left a level: keep nothing level-specific */}
+ G.pos=o;if(LVid){G.lvq=G.lvq||{};if(o.q)G.lvq[LVid]=o.q}saveG()}catch(e){}}
+function posRestore(){try{const s=G.pos;if(!s||!isFinite(s.x+s.y+s.z))return false;
+ if(s.zone){if(!FT||!ZM[s.zone]||!ZM[s.zone].isLevel)return false;const st=FT.station(s.zone);if(!st)return false;
+  loadZone(s.zone,st);if(!LV||LVid!==s.zone)return false;
+  PL.p.set(s.x,s.y,s.z);if(!LV.contains(PL.p.x,PL.p.z)){/* saved spot not inside: fall back to the level spawn */PL.p.copy(LV.spawn.p)}
+  LV.resolve(PL.p,.5);
+  if(s.q&&LV.quests)for(const q of LV.quests){const a=s.q[q.id];if(a){q.step=Math.min(a[0],q.steps?q.steps.length:a[0]);q.done=!!a[1]}}
+ }else{if(LV){lvUnmerge();try{LV.unload()}catch(e){}LV=null;LVid=null}
+  if(Math.abs(s.x)>240||Math.abs(s.z)>260||s.y>-.5)return false;PL.p.set(s.x,s.y,s.z)}
+ PL.yaw=s.yaw||0;PL.v.set(0,0,0);PL.spd=0;PL._cY=null;PL.hurtT=2;camInit=true;curZone=null;last=performance.now();return true}catch(e){console.warn('posRestore',e);return false}}
+{const _start0=start;start=function(fresh){_start0(fresh);if(!fresh&&posRestore()){try{toast('Welcome back! Progress restored')}catch(e){}}if(fresh){G.pos=null;G.lvq=null}}}
+{const _go0=gameOver;gameOver=function(){const r=_go0.apply(this,arguments);if(G.pos){G.pos=null;saveG()}return r}}
+{const _se0=showEnding;showEnding=function(){G.pos=null;return _se0.apply(this,arguments)}}
+setInterval(()=>{if(state==='play'&&performance.now()-_posT>2400){_posT=performance.now();posSnap()}},1200);
+document.addEventListener('visibilitychange',()=>{if(document.hidden)posSnap()});addEventListener('pagehide',posSnap);
+window.__fx=()=>({fov:cam.fov,roll:camRoll,lines:lines&&lines.userData&&lines.userData.m?lines.userData.m.opacity:0,bv:+($('bvig').style.opacity||0),hurt:+($('hurt').style.opacity||0),rm:!!S.rm});
+window.__posSnap=posSnap;
+
 // ---------- Graphics tiers: std / hd / cine / ext ----------
 const GFX_MOB=/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||(matchMedia&&matchMedia('(pointer:coarse)').matches&&Math.min(screen.width,screen.height)<820);
 let GFX=S.gfx||'std',GFX_BOOT=GFX,TXM=null,CINE=null,XTR=null,gfxDt=1/60;
@@ -7516,7 +7542,7 @@ function houseMarkers(){const m=[];try{const H=LV?LVHOUSES:HOUSES;if(H)m.push(..
 // ---------- UI flow ----------
 function show(id,on){$(id).classList.toggle('hidden',!on)}
 function buildTitle(){const b=$('tbtns');b.innerHTML='';const mk=(t,cls,fn)=>{const e=document.createElement('button');e.className='btn '+(cls||'');e.textContent=t;e.onclick=fn;b.appendChild(e);b.appendChild(document.createElement('br'))};
- if(hasSave&&G.stage>0)mk('Continue','pri',()=>start(false));mk(hasSave&&G.stage>0?'New game':'Start adventure',hasSave&&G.stage>0?'':'pri',()=>start(true));mk('Settings','',()=>{pause();state='pause'});
+ const _cont=hasSave&&(G.stage>0||!!G.pos);if(_cont)mk('Continue','pri',()=>start(false));mk(_cont?'New game':'Start adventure',_cont?'':'pri',()=>start(true));mk('Settings','',()=>{pause();state='pause'});
  const sk=$('skins');sk.innerHTML='';for(const k in SKINS){const e=document.createElement('div');const un=G.unlocked[k];e.className='skin'+(G.skin===k?' sel':'')+(un?'':' lock');e.innerHTML=`<b>${SP[SKINS[k].sp].name}</b><br><small>${un?(k==='clown'?'hides in anemones':'stung by anemones'):'🔒 '+SKINS[k].need}</small>`;e.onclick=()=>{if(!un)return;G.skin=k;saveG();buildPlayer();buildTitle()};sk.appendChild(e)}}
 function start(fresh){if(fresh){const keep=G.unlocked,sk=G.unlocked[G.skin]?G.skin:'clown';G=NEWG();G.unlocked=keep;G.skin=sk;saveG();hasSave=true;buildPlayer()}
  askTilt();initAudio();
